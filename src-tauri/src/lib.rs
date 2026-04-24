@@ -54,6 +54,8 @@ pub fn run() {
             commands::provider::upsert_provider,
             commands::provider::delete_provider,
             commands::dialog::pick_material_images,
+            commands::file::reveal_path,
+            commands::file::open_generated_dir,
             commands::generation::create_generation_task,
             commands::generation::generate_image,
         ])
