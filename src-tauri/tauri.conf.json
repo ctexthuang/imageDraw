@@ -13,23 +13,23 @@
     "windows": [
       {
         "title": "Image Draw AI",
-        "width": 1100,
-        "height": 760,
-        "minWidth": 900,
-        "minHeight": 620
+        "width": 1280,
+        "height": 1160,
+        "minWidth": 1180,
+        "minHeight": 1100
       }
     ],
     "security": {
       "csp": null,
       "assetProtocol": {
         "enable": true,
-        "scope": ["$APPDATA/**"]
+        "scope": ["$APPDATA/**", "$HOME/**", "$PICTURE/**", "$DOWNLOAD/**", "$DESKTOP/**", "$DOCUMENT/**"]
       }
     }
   },
   "bundle": {
     "active": true,
     "targets": "all",
-    "icon": []
+    "icon": ["icons/icon.png"]
   }
 }

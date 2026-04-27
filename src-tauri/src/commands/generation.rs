@@ -54,7 +54,9 @@ pub async fn generate_image(
     let model = input
         .model
         .clone()
+        .filter(|model| !model.trim().is_empty())
         .or_else(|| provider.image_model.clone())
+        .filter(|model| !model.trim().is_empty())
         .ok_or_else(|| AppError::Provider("image model is empty".to_string()))?;
 
     let task = repository::create_generation_task(

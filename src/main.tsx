@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import ReactDOM from 'react-dom/client';
 import { convertFileSrc, invoke } from '@tauri-apps/api/core';
+import appLogo from './assets/logo.svg';
 import './styles.css';
 
 type ProviderConfig = {
@@ -20,8 +21,8 @@ type ProviderForm = {
   kind: string;
   base_url: string;
   api_key: string;
-  text_model: string;
-  image_model: string;
+  text_model?: string | null;
+  image_model?: string | null;
   enabled: boolean;
 };
 
@@ -60,8 +61,8 @@ const defaultProviderForm: ProviderForm = {
   kind: 'openai-compatible',
   base_url: 'https://api.openai.com/v1',
   api_key: '',
-  text_model: 'gpt-5',
-  image_model: 'gpt-image-2',
+  text_model: null,
+  image_model: null,
   enabled: true,
 };
 
@@ -73,10 +74,15 @@ const initialGenerationSteps: GenerationStep[] = [
   { label: '更新结果列表', status: 'pending' },
 ];
 
+const imageModelOptions = ['gpt-image-1', 'gpt-image-1.5', 'gpt-image-2'];
+const imageSizeOptions = ['1024x1024', '1024x1536', '1536x1024'];
+const imageQualityOptions = ['auto', 'high', 'medium', 'low'];
+
 function App() {
   const [providers, setProviders] = useState<ProviderConfig[]>([]);
   const [providerForm, setProviderForm] = useState<ProviderForm>(defaultProviderForm);
   const [prompt, setPrompt] = useState('一只赛博朋克风格的橘猫坐在霓虹灯下');
+  const [selectedImageModel, setSelectedImageModel] = useState('gpt-image-2');
   const [imageSize, setImageSize] = useState('1024x1024');
   const [imageQuality, setImageQuality] = useState('auto');
   const [status, setStatus] = useState('准备就绪');
@@ -119,8 +125,8 @@ function App() {
         kind: current.kind,
         base_url: current.base_url,
         api_key: current.api_key ?? form.api_key,
-        text_model: current.text_model ?? defaultProviderForm.text_model,
-        image_model: current.image_model ?? defaultProviderForm.image_model,
+        text_model: current.text_model ?? null,
+        image_model: null,
         enabled: current.enabled,
       }));
     }
@@ -130,7 +136,7 @@ function App() {
     setIsBusy(true);
     setStatus('正在保存配置...');
     try {
-      await invoke('upsert_provider', { input: providerForm });
+      await invoke('upsert_provider', { input: { ...providerForm, image_model: null } });
       await refreshProviders();
       setStatus('配置已保存');
     } catch (error) {
@@ -165,8 +171,8 @@ function App() {
       kind: provider.kind,
       base_url: provider.base_url,
       api_key: provider.api_key ?? form.api_key,
-      text_model: provider.text_model ?? defaultProviderForm.text_model,
-      image_model: provider.image_model ?? defaultProviderForm.image_model,
+      text_model: provider.text_model ?? null,
+      image_model: null,
       enabled: provider.enabled,
     }));
     setStatus('已切换模型配置');
@@ -178,7 +184,7 @@ function App() {
     setStatus('正在生成图片...');
     try {
       startStep(0);
-      await invoke('upsert_provider', { input: providerForm });
+      await invoke('upsert_provider', { input: { ...providerForm, image_model: null } });
       startStep(1);
       await new Promise((resolve) => window.setTimeout(resolve, 120));
       startStep(2);
@@ -186,7 +192,7 @@ function App() {
         input: {
           provider_id: providerForm.id,
           prompt,
-          model: providerForm.image_model,
+          model: selectedImageModel,
           size: imageSize,
           quality: imageQuality,
           image_paths: materialPaths,
@@ -260,7 +266,7 @@ function App() {
     <main className="app-shell">
       <header className="topbar">
         <div className="brand">
-          <div className="brand-mark">绘</div>
+          <img className="brand-mark" src={appLogo} alt="Image Draw AI" />
           <div>
             <h1>Image Draw AI</h1>
             <p>图片默认保存到应用数据文件夹</p>
@@ -269,7 +275,7 @@ function App() {
         <div className="topbar-actions">
           <div className="current-provider">
             <span>当前模型</span>
-            <strong>{providerForm.image_model}</strong>
+            <strong>{selectedImageModel}</strong>
           </div>
           <button className="ghost" onClick={() => setIsSettingsOpen(true)}>设置</button>
         </div>
@@ -288,25 +294,30 @@ function App() {
           </label>
 
           <div className="material-panel">
-            <div className="material-toolbar">
-              <button onClick={pickMaterialImages} disabled={isBusy}>导入素材</button>
-              {materialPaths.length > 0 && (
-                <button className="ghost" onClick={() => setMaterialPaths([])} disabled={isBusy}>清空</button>
-              )}
-              <span>{materialPaths.length > 0 ? `${materialPaths.length} 张素材` : '未导入素材'}</span>
-            </div>
-            <p className="drop-hint">支持 PNG / JPG / WEBP，多张素材会使用图像编辑模式</p>
-
-            {materialPaths.length > 0 && (
-              <div className="material-grid">
-                {materialPaths.map((path) => (
-                  <article className="material-card" key={path}>
-                    <img src={convertFileSrc(path)} alt="素材图片" />
-                    <button onClick={() => removeMaterialImage(path)} disabled={isBusy}>移除</button>
-                  </article>
-                ))}
+            <div className="material-header">
+              <div>
+                <strong>参考图</strong>
+                <span>{materialPaths.length > 0 ? `${materialPaths.length} 张，图像编辑模式` : '可选，支持多张'}</span>
               </div>
-            )}
+              {materialPaths.length > 0 && (
+                <button className="ghost mini" onClick={() => setMaterialPaths([])} disabled={isBusy}>清空</button>
+              )}
+            </div>
+
+            <div className="reference-strip">
+              <button className="add-reference-card" onClick={pickMaterialImages} disabled={isBusy}>
+                <span>+</span>
+                <strong>添加参考图</strong>
+                <small>PNG/JPG/WEBP</small>
+              </button>
+              {materialPaths.map((path, index) => (
+                <article className="reference-card" key={path}>
+                  <img src={convertFileSrc(path)} alt="素材图片" />
+                  <span>{index + 1}</span>
+                  <button onClick={() => removeMaterialImage(path)} disabled={isBusy}>×</button>
+                </article>
+              ))}
+            </div>
           </div>
 
           <div className="params-card">
@@ -314,29 +325,31 @@ function App() {
               <span>生成参数</span>
               <strong>基础</strong>
             </div>
-            <div className="segmented">
-              {['1024x1024', '1024x1536', '1536x1024'].map((size) => (
-                <button
-                  className={imageSize === size ? 'active' : ''}
-                  key={size}
-                  onClick={() => setImageSize(size)}
-                  disabled={isBusy}
-                >
-                  {size}
-                </button>
-              ))}
-            </div>
-            <div className="segmented compact">
-              {['auto', 'high', 'medium', 'low'].map((quality) => (
-                <button
-                  className={imageQuality === quality ? 'active' : ''}
-                  key={quality}
-                  onClick={() => setImageQuality(quality)}
-                  disabled={isBusy}
-                >
-                  {quality}
-                </button>
-              ))}
+            <label className="field compact-field">
+              <span>图像模型</span>
+              <select value={selectedImageModel} onChange={(event) => setSelectedImageModel(event.target.value)} disabled={isBusy}>
+                {imageModelOptions.map((model) => (
+                  <option key={model} value={model}>{model}</option>
+                ))}
+              </select>
+            </label>
+            <div className="grid two">
+              <label className="field compact-field">
+                <span>分辨率</span>
+                <select value={imageSize} onChange={(event) => setImageSize(event.target.value)} disabled={isBusy}>
+                  {imageSizeOptions.map((size) => (
+                    <option key={size} value={size}>{size}</option>
+                  ))}
+                </select>
+              </label>
+              <label className="field compact-field">
+                <span>质量</span>
+                <select value={imageQuality} onChange={(event) => setImageQuality(event.target.value)} disabled={isBusy}>
+                  {imageQualityOptions.map((quality) => (
+                    <option key={quality} value={quality}>{quality}</option>
+                  ))}
+                </select>
+              </label>
             </div>
           </div>
 
@@ -344,22 +357,7 @@ function App() {
             {isBusy ? '正在生成...' : '开始生成'}
           </button>
 
-          <div className={`progress-card ${isBusy ? 'is-loading' : ''}`}>
-            <div className="spinner" aria-hidden="true" />
-            <div className="progress-content">
-              <strong>{isBusy ? '生成中' : '生成流程'}</strong>
-              <ol className="step-list">
-                {generationSteps.map((step) => (
-                  <li className={`step ${step.status}`} key={step.label}>
-                    <span />
-                    {step.label}
-                  </li>
-                ))}
-              </ol>
-            </div>
-          </div>
-
-          <p className="status">{status}</p>
+          {status !== '准备就绪' && <p className="status">{status}</p>}
         </aside>
 
         <section className="result-card">
@@ -393,6 +391,21 @@ function App() {
               ))}
             </div>
           )}
+
+          <div className={`progress-card result-progress ${isBusy ? 'is-loading' : ''}`}>
+            <div className="spinner" aria-hidden="true" />
+            <div className="progress-content">
+              <strong>{isBusy ? '生成中' : '生成流程'}</strong>
+              <ol className="step-list">
+                {generationSteps.map((step) => (
+                  <li className={`step ${step.status}`} key={step.label}>
+                    <span />
+                    {step.label}
+                  </li>
+                ))}
+              </ol>
+            </div>
+          </div>
         </section>
       </section>
 
@@ -452,23 +465,6 @@ function App() {
                 </label>
               </section>
 
-              <section className="settings-group">
-                <div className="section-heading">
-                  <span>模型</span>
-                  <strong>默认模型</strong>
-                </div>
-                <div className="grid two">
-                  <label className="field">
-                    <span>文本模型</span>
-                    <input value={providerForm.text_model} onChange={(event) => updateProviderForm('text_model', event.target.value)} />
-                  </label>
-                  <label className="field">
-                    <span>图像模型</span>
-                    <input value={providerForm.image_model} onChange={(event) => updateProviderForm('image_model', event.target.value)} />
-                  </label>
-                </div>
-              </section>
-
               <div className="drawer-actions">
                 <button onClick={saveProvider} disabled={isBusy}>保存配置</button>
                 <button className="ghost" onClick={refreshProviders} disabled={isBusy}>刷新</button>
@@ -489,7 +485,6 @@ function App() {
                           <button className="link-button" onClick={() => loadProvider(provider)} disabled={isBusy}>
                             <strong>{provider.name}</strong>
                             <span>{provider.base_url}</span>
-                            <span>{provider.image_model}</span>
                           </button>
                           <button className="danger" onClick={() => deleteProvider(provider.id)} disabled={isBusy}>删除</button>
                         </div>
