@@ -11,7 +11,11 @@ pub async fn pick_material_images(app: tauri::AppHandle) -> Result<Vec<String>, 
     let paths = files
         .unwrap_or_default()
         .into_iter()
-        .filter_map(|file_path| file_path.as_path().map(|path| path.to_string_lossy().to_string()))
+        .filter_map(|file_path| {
+            file_path
+                .as_path()
+                .map(|path| path.to_string_lossy().to_string())
+        })
         .collect();
 
     Ok(paths)

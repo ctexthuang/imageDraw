@@ -32,11 +32,12 @@ fn parse_image_response(response_text: &str) -> Result<ImageResult, AppError> {
         ));
     }
 
-    let response_body: ImageResponseBody = serde_json::from_str(response_text).map_err(|error| {
-        AppError::Provider(format!(
-            "failed to decode image response: {error}; response body: {response_text}"
-        ))
-    })?;
+    let response_body: ImageResponseBody =
+        serde_json::from_str(response_text).map_err(|error| {
+            AppError::Provider(format!(
+                "failed to decode image response: {error}; response body: {response_text}"
+            ))
+        })?;
     let image_data = response_body
         .data
         .into_iter()
@@ -45,7 +46,9 @@ fn parse_image_response(response_text: &str) -> Result<ImageResult, AppError> {
                 .map(ImageData::Base64)
                 .or_else(|| item.url.map(ImageData::Url))
         })
-        .ok_or_else(|| AppError::Provider("image response did not include b64_json or url".to_string()))?;
+        .ok_or_else(|| {
+            AppError::Provider("image response did not include b64_json or url".to_string())
+        })?;
 
     Ok(ImageResult {
         mime_type: "image/png".to_string(),
@@ -96,8 +99,13 @@ impl AiProvider for OpenAiCompatibleProvider {
 
         let status = response.status();
         if !status.is_success() {
-            let message = response.text().await.unwrap_or_else(|_| "request failed".to_string());
-            return Err(AppError::Provider(format!("image generation failed ({status}): {message}")));
+            let message = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "request failed".to_string());
+            return Err(AppError::Provider(format!(
+                "image generation failed ({status}): {message}"
+            )));
         }
 
         let response_text = response.text().await?;
@@ -134,7 +142,9 @@ impl AiProvider for OpenAiCompatibleProvider {
                 Some("webp") => "image/webp",
                 _ => "image/png",
             };
-            let part = multipart::Part::bytes(bytes).file_name(file_name).mime_str(mime)?;
+            let part = multipart::Part::bytes(bytes)
+                .file_name(file_name)
+                .mime_str(mime)?;
             form = form.part("image[]", part);
         }
 
@@ -148,8 +158,13 @@ impl AiProvider for OpenAiCompatibleProvider {
 
         let status = response.status();
         if !status.is_success() {
-            let message = response.text().await.unwrap_or_else(|_| "request failed".to_string());
-            return Err(AppError::Provider(format!("image edit failed ({status}): {message}")));
+            let message = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "request failed".to_string());
+            return Err(AppError::Provider(format!(
+                "image edit failed ({status}): {message}"
+            )));
         }
 
         let response_text = response.text().await?;

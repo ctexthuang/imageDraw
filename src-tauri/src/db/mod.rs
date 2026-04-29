@@ -1,6 +1,6 @@
 use std::fs;
 
-use sqlx::{sqlite::SqliteConnectOptions, SqlitePool};
+use sqlx::{sqlite::SqliteConnectOptions, Row, SqlitePool};
 use tauri::{AppHandle, Manager};
 
 use crate::AppError;
@@ -24,6 +24,38 @@ pub async fn init(app: &AppHandle) -> Result<SqlitePool, AppError> {
             sqlx::query(statement).execute(&pool).await?;
         }
     }
+    ensure_column(
+        &pool,
+        "providers",
+        "capabilities",
+        "TEXT NOT NULL DEFAULT '{}'",
+    )
+    .await?;
 
     Ok(pool)
+}
+
+async fn ensure_column(
+    pool: &SqlitePool,
+    table: &str,
+    column: &str,
+    definition: &str,
+) -> Result<(), AppError> {
+    let rows = sqlx::query(&format!("PRAGMA table_info({table})"))
+        .fetch_all(pool)
+        .await?;
+    let has_column = rows.iter().any(|row| {
+        row.try_get::<String, _>("name")
+            .map(|name| name == column)
+            .unwrap_or(false)
+    });
+    if !has_column {
+        sqlx::query(&format!(
+            "ALTER TABLE {table} ADD COLUMN {column} {definition}"
+        ))
+        .execute(pool)
+        .await?;
+    }
+
+    Ok(())
 }

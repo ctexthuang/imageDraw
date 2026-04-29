@@ -19,8 +19,10 @@ pub async fn list_providers(pool: &SqlitePool) -> Result<Vec<ProviderConfig>, Ap
             api_key_encrypted AS api_key,
             text_model,
             image_model,
+            capabilities,
             enabled != 0 AS enabled
         FROM providers
+        WHERE enabled != 0
         ORDER BY updated_at DESC
         "#,
     )
@@ -30,24 +32,34 @@ pub async fn list_providers(pool: &SqlitePool) -> Result<Vec<ProviderConfig>, Ap
     Ok(providers)
 }
 
-pub async fn upsert_provider(pool: &SqlitePool, input: UpsertProviderInput) -> Result<(), AppError> {
+pub async fn upsert_provider(
+    pool: &SqlitePool,
+    input: UpsertProviderInput,
+) -> Result<(), AppError> {
     let now = Utc::now().to_rfc3339();
 
-    let existing_api_key: Option<String> = sqlx::query_scalar(
+    let existing: Option<(Option<String>, Option<String>)> = sqlx::query_as(
         r#"
-        SELECT api_key_encrypted
+        SELECT api_key_encrypted, capabilities
         FROM providers
         WHERE id = ?1
         "#,
     )
     .bind(&input.id)
     .fetch_optional(pool)
-    .await?
-    .flatten();
-    let api_key = input
-        .api_key
-        .filter(|key| !key.trim().is_empty())
-        .or(existing_api_key);
+    .await?;
+    let api_key = match input.api_key {
+        Some(key) if key.trim().is_empty() => None,
+        Some(key) => Some(key),
+        None => existing.as_ref().and_then(|item| item.0.clone()),
+    };
+    let capabilities = input
+        .capabilities
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| existing.and_then(|item| item.1))
+        .unwrap_or_else(|| {
+            r#"{"responses_api":true,"images_api":true,"chat_completions":true,"image_edit":true,"image_models":[],"selected_image_models":[]}"#.to_string()
+        });
 
     sqlx::query(
         r#"
@@ -62,6 +74,7 @@ pub async fn upsert_provider(pool: &SqlitePool, input: UpsertProviderInput) -> R
             api_key_encrypted = excluded.api_key_encrypted,
             text_model = excluded.text_model,
             image_model = excluded.image_model,
+            capabilities = excluded.capabilities,
             enabled = excluded.enabled,
             updated_at = excluded.updated_at
         "#,
@@ -73,7 +86,7 @@ pub async fn upsert_provider(pool: &SqlitePool, input: UpsertProviderInput) -> R
     .bind(api_key)
     .bind(input.text_model)
     .bind(input.image_model)
-    .bind(r#"{"responses_api":true,"images_api":true,"chat_completions":true,"image_edit":true}"#)
+    .bind(capabilities)
     .bind(input.enabled)
     .bind(now)
     .execute(pool)
@@ -98,6 +111,34 @@ pub async fn get_provider_secret(pool: &SqlitePool, id: &str) -> Result<Provider
 }
 
 pub async fn delete_provider(pool: &SqlitePool, id: &str) -> Result<(), AppError> {
+    let reference_count: i64 = sqlx::query_scalar(
+        r#"
+        SELECT
+            (SELECT COUNT(*) FROM generation_tasks WHERE provider_id = ?1) +
+            (SELECT COUNT(*) FROM conversations WHERE provider_id = ?1) +
+            (SELECT COUNT(*) FROM ai_request_logs WHERE provider_id = ?1)
+        "#,
+    )
+    .bind(id)
+    .fetch_one(pool)
+    .await?;
+
+    if reference_count > 0 {
+        let now = Utc::now().to_rfc3339();
+        sqlx::query(
+            r#"
+            UPDATE providers
+            SET enabled = 0, updated_at = ?2
+            WHERE id = ?1
+            "#,
+        )
+        .bind(id)
+        .bind(now)
+        .execute(pool)
+        .await?;
+        return Ok(());
+    }
+
     sqlx::query("DELETE FROM providers WHERE id = ?1")
         .bind(id)
         .execute(pool)

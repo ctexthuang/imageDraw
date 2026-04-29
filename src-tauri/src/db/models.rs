@@ -10,6 +10,7 @@ pub struct ProviderConfig {
     pub api_key: Option<String>,
     pub text_model: Option<String>,
     pub image_model: Option<String>,
+    pub capabilities: Option<String>,
     pub enabled: bool,
 }
 
@@ -33,6 +34,7 @@ pub struct UpsertProviderInput {
     pub api_key: Option<String>,
     pub text_model: Option<String>,
     pub image_model: Option<String>,
+    pub capabilities: Option<String>,
     pub enabled: bool,
 }
 

@@ -1,8 +1,8 @@
 mod ai;
 mod commands;
 mod db;
-mod storage;
 mod state;
+mod storage;
 
 use serde::Serialize;
 use state::AppState;
@@ -53,6 +53,7 @@ pub fn run() {
             commands::provider::list_providers,
             commands::provider::upsert_provider,
             commands::provider::delete_provider,
+            commands::provider::fetch_provider_models,
             commands::dialog::pick_material_images,
             commands::file::reveal_path,
             commands::file::open_generated_dir,
