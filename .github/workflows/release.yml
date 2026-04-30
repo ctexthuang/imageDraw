@@ -3,7 +3,7 @@ name: Release
 on:
   push:
     tags:
-      - '*'
+      - 'v*.*.*'
 
 permissions:
   contents: write
@@ -19,20 +19,79 @@ jobs:
     outputs:
       release_id: ${{ steps.release.outputs.result }}
     steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Build release notes from commits
+        id: release-notes
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          tag="$GITHUB_REF_NAME"
+          target_commit="$(git rev-list -n 1 "$tag")"
+          previous_tag=""
+          if git rev-parse "${target_commit}^" >/dev/null 2>&1; then
+            previous_tag="$(
+              git describe --tags --abbrev=0 \
+                --match 'v[0-9]*.[0-9]*.[0-9]*' \
+                --match '[0-9]*.[0-9]*.[0-9]*' \
+                "${target_commit}^" 2>/dev/null || true
+            )"
+          fi
+          notes_file="$RUNNER_TEMP/release-notes.md"
+
+          {
+            echo "## Commits"
+            echo
+            if [[ -n "$previous_tag" ]]; then
+              echo "Changes since \`$previous_tag\`:"
+              echo
+              commit_range="$previous_tag..$target_commit"
+            else
+              echo "Initial release commits:"
+              echo
+              commit_range="$target_commit"
+            fi
+
+            commit_lines="$(git log --pretty=format:'- `%h` %s (%an)' "$commit_range")"
+            if [[ -n "$commit_lines" ]]; then
+              printf '%s\n' "$commit_lines"
+            else
+              echo "- No commits found."
+            fi
+          } > "$notes_file"
+
+          echo "notes_file=$notes_file" >> "$GITHUB_OUTPUT"
+          echo "target_commit=$target_commit" >> "$GITHUB_OUTPUT"
+
       - name: Create or reuse release
         id: release
         uses: actions/github-script@v7
+        env:
+          RELEASE_NOTES_FILE: ${{ steps.release-notes.outputs.notes_file }}
+          TARGET_COMMIT: ${{ steps.release-notes.outputs.target_commit }}
         with:
           result-encoding: string
           script: |
+            const fs = require('node:fs');
             const tag = context.ref.replace('refs/tags/', '');
             const { owner, repo } = context.repo;
+            const body = fs.readFileSync(process.env.RELEASE_NOTES_FILE, 'utf8');
 
             try {
               const existing = await github.rest.repos.getReleaseByTag({
                 owner,
                 repo,
                 tag,
+              });
+              await github.rest.repos.updateRelease({
+                owner,
+                repo,
+                release_id: existing.data.id,
+                body,
               });
               core.info(`Using existing release ${existing.data.html_url}`);
               return String(existing.data.id);
@@ -48,10 +107,10 @@ jobs:
               repo,
               tag_name: tag,
               name: tag,
-              target_commitish: context.sha,
+              target_commitish: process.env.TARGET_COMMIT,
               draft: false,
               prerelease,
-              generate_release_notes: true,
+              body,
             });
             core.info(`Created release ${release.data.html_url}`);
             return String(release.data.id);
