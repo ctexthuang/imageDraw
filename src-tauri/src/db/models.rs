@@ -75,6 +75,7 @@ pub struct ImageAsset {
 #[derive(Debug, Clone, Deserialize)]
 pub struct GenerateImageInput {
     pub provider_id: String,
+    pub request_id: Option<String>,
     pub prompt: String,
     pub model: Option<String>,
     pub size: Option<String>,

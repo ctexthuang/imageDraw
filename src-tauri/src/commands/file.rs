@@ -1,5 +1,7 @@
-use tauri::{AppHandle, Manager};
+use tauri::AppHandle;
 use tauri_plugin_opener::OpenerExt;
+
+use crate::storage;
 
 #[tauri::command]
 pub async fn reveal_path(app: AppHandle, path: String) -> Result<(), String> {
@@ -10,12 +12,7 @@ pub async fn reveal_path(app: AppHandle, path: String) -> Result<(), String> {
 
 #[tauri::command]
 pub async fn open_generated_dir(app: AppHandle) -> Result<(), String> {
-    let dir = app
-        .path()
-        .app_data_dir()
-        .map_err(|error| error.to_string())?
-        .join("images")
-        .join("generated");
+    let dir = storage::generated_images_dir(&app).map_err(|error| error.to_string())?;
 
     std::fs::create_dir_all(&dir).map_err(|error| error.to_string())?;
     app.opener()

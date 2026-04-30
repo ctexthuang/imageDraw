@@ -1,11 +1,14 @@
+use std::{collections::HashMap, sync::Arc, time::Duration};
+
 use tauri::{AppHandle, State};
+use tokio::sync::{oneshot, Mutex};
 
 use crate::{
     ai::{
         dashscope::DashScopeProvider,
         google_gemini::GoogleGeminiProvider,
         openai_compatible::OpenAiCompatibleProvider,
-        provider::{AiProvider, ImageData, ImageEditRequest, ImageGenerateRequest},
+        provider::{AiProvider, ImageData, ImageEditRequest, ImageGenerateRequest, ImageResult},
         seedream::SeedreamProvider,
         tencent_hunyuan::TencentHunyuanProvider,
     },
@@ -18,6 +21,17 @@ use crate::{
     state::AppState,
     storage, AppError,
 };
+
+#[tauri::command]
+pub async fn cancel_generation(
+    state: State<'_, AppState>,
+    request_id: String,
+) -> Result<bool, AppError> {
+    let sender = state.cancellations.lock().await.remove(&request_id);
+    Ok(sender
+        .map(|sender| sender.send(()).is_ok())
+        .unwrap_or(false))
+}
 
 #[tauri::command]
 pub async fn create_generation_task(
@@ -126,116 +140,40 @@ pub async fn generate_image(
     )
     .await?;
 
-    let image_result = match if provider.kind == "volcengine-ark" {
-        let ai_provider = SeedreamProvider::new(provider.base_url, api_key);
-        if input.image_paths.is_empty() {
-            ai_provider
-                .generate_image(ImageGenerateRequest {
-                    prompt: input.prompt,
-                    model,
-                    size: input.size,
-                    quality: input.quality,
-                })
-                .await
-        } else {
-            ai_provider
-                .edit_image(ImageEditRequest {
-                    prompt: input.prompt,
-                    model,
-                    size: input.size,
-                    quality: input.quality,
-                    image_paths: input.image_paths,
-                })
-                .await
-        }
-    } else if provider.kind == "dashscope" {
-        let ai_provider = DashScopeProvider::new(provider.base_url, api_key);
-        if input.image_paths.is_empty() {
-            ai_provider
-                .generate_image(ImageGenerateRequest {
-                    prompt: input.prompt,
-                    model,
-                    size: input.size,
-                    quality: input.quality,
-                })
-                .await
-        } else {
-            ai_provider
-                .edit_image(ImageEditRequest {
-                    prompt: input.prompt,
-                    model,
-                    size: input.size,
-                    quality: input.quality,
-                    image_paths: input.image_paths,
-                })
-                .await
-        }
-    } else if provider.kind == "tencent-hunyuan" {
-        let ai_provider = TencentHunyuanProvider::new(provider.base_url, api_key)?;
-        if input.image_paths.is_empty() {
-            ai_provider
-                .generate_image(ImageGenerateRequest {
-                    prompt: input.prompt,
-                    model,
-                    size: input.size,
-                    quality: input.quality,
-                })
-                .await
-        } else {
-            ai_provider
-                .edit_image(ImageEditRequest {
-                    prompt: input.prompt,
-                    model,
-                    size: input.size,
-                    quality: input.quality,
-                    image_paths: input.image_paths,
-                })
-                .await
-        }
-    } else if provider.kind == "google-gemini" {
-        let ai_provider = GoogleGeminiProvider::new(provider.base_url, api_key);
-        if input.image_paths.is_empty() {
-            ai_provider
-                .generate_image(ImageGenerateRequest {
-                    prompt: input.prompt,
-                    model,
-                    size: input.size,
-                    quality: input.quality,
-                })
-                .await
-        } else {
-            ai_provider
-                .edit_image(ImageEditRequest {
-                    prompt: input.prompt,
-                    model,
-                    size: input.size,
-                    quality: input.quality,
-                    image_paths: input.image_paths,
-                })
-                .await
+    let request_id = input
+        .request_id
+        .clone()
+        .filter(|value| !value.trim().is_empty());
+    let (cancel_sender, cancel_receiver) = oneshot::channel();
+    if let Some(request_id) = &request_id {
+        state
+            .cancellations
+            .lock()
+            .await
+            .insert(request_id.clone(), cancel_sender);
+    }
+    let cancel_guard = CancellationGuard {
+        cancellations: state.cancellations.clone(),
+        request_id: request_id.clone(),
+    };
+
+    let image_future = run_image_generation(
+        provider.kind.clone(),
+        provider.base_url,
+        api_key,
+        model,
+        input,
+    );
+    let image_result = match if request_id.is_some() {
+        tokio::select! {
+            result = image_future => result,
+            _ = cancel_receiver => {
+                repository::mark_generation_task_failed(&state.db, &task.id, "generation cancelled").await?;
+                return Err(AppError::Provider("生成已强制停止".to_string()));
+            }
         }
     } else {
-        let ai_provider = OpenAiCompatibleProvider::new(provider.base_url, api_key);
-        if input.image_paths.is_empty() {
-            ai_provider
-                .generate_image(ImageGenerateRequest {
-                    prompt: input.prompt,
-                    model,
-                    size: input.size,
-                    quality: input.quality,
-                })
-                .await
-        } else {
-            ai_provider
-                .edit_image(ImageEditRequest {
-                    prompt: input.prompt,
-                    model,
-                    size: input.size,
-                    quality: input.quality,
-                    image_paths: input.image_paths,
-                })
-                .await
-        }
+        image_future.await
     } {
         Ok(result) => result,
         Err(error) => {
@@ -247,8 +185,28 @@ pub async fn generate_image(
 
     let image_bytes = match &image_result.data {
         ImageData::Base64(data_base64) => storage::decode_base64_image(data_base64)?,
-        ImageData::Url(url) => reqwest::get(url).await?.bytes().await?.to_vec(),
+        ImageData::Url(url) => {
+            let download_future =
+                async { Ok::<_, AppError>(reqwest::get(url).await?.bytes().await?.to_vec()) };
+            if request_id.is_some() {
+                tokio::select! {
+                    result = download_future => result?,
+                    _ = cancel_guard.cancelled() => {
+                        repository::mark_generation_task_failed(&state.db, &task.id, "generation cancelled").await?;
+                        return Err(AppError::Provider("生成已强制停止".to_string()));
+                    }
+                }
+            } else {
+                download_future.await?
+            }
+        }
     };
+    if cancel_guard.is_cancelled().await {
+        repository::mark_generation_task_failed(&state.db, &task.id, "generation cancelled")
+            .await?;
+        return Err(AppError::Provider("生成已强制停止".to_string()));
+    }
+
     let stored_image =
         storage::save_generated_image_bytes(&app, &image_bytes, &image_result.mime_type)?;
     let file_path = stored_image.file_path.to_string_lossy().to_string();
@@ -270,4 +228,161 @@ pub async fn generate_image(
         },
         asset,
     })
+}
+
+struct CancellationGuard {
+    cancellations: Arc<Mutex<HashMap<String, oneshot::Sender<()>>>>,
+    request_id: Option<String>,
+}
+
+impl CancellationGuard {
+    async fn is_cancelled(&self) -> bool {
+        if let Some(request_id) = &self.request_id {
+            return !self.cancellations.lock().await.contains_key(request_id);
+        }
+        false
+    }
+
+    async fn cancelled(&self) {
+        if let Some(request_id) = &self.request_id {
+            loop {
+                if !self.cancellations.lock().await.contains_key(request_id) {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(80)).await;
+            }
+        }
+        std::future::pending::<()>().await;
+    }
+}
+
+impl Drop for CancellationGuard {
+    fn drop(&mut self) {
+        if let Some(request_id) = self.request_id.clone() {
+            let cancellations = self.cancellations.clone();
+            tauri::async_runtime::spawn(async move {
+                cancellations.lock().await.remove(&request_id);
+            });
+        }
+    }
+}
+
+async fn run_image_generation(
+    provider_kind: String,
+    base_url: String,
+    api_key: String,
+    model: String,
+    input: GenerateImageInput,
+) -> Result<ImageResult, AppError> {
+    if provider_kind == "volcengine-ark" {
+        let ai_provider = SeedreamProvider::new(base_url, api_key);
+        if input.image_paths.is_empty() {
+            ai_provider
+                .generate_image(ImageGenerateRequest {
+                    prompt: input.prompt,
+                    model,
+                    size: input.size,
+                    quality: input.quality,
+                })
+                .await
+        } else {
+            ai_provider
+                .edit_image(ImageEditRequest {
+                    prompt: input.prompt,
+                    model,
+                    size: input.size,
+                    quality: input.quality,
+                    image_paths: input.image_paths,
+                })
+                .await
+        }
+    } else if provider_kind == "dashscope" {
+        let ai_provider = DashScopeProvider::new(base_url, api_key);
+        if input.image_paths.is_empty() {
+            ai_provider
+                .generate_image(ImageGenerateRequest {
+                    prompt: input.prompt,
+                    model,
+                    size: input.size,
+                    quality: input.quality,
+                })
+                .await
+        } else {
+            ai_provider
+                .edit_image(ImageEditRequest {
+                    prompt: input.prompt,
+                    model,
+                    size: input.size,
+                    quality: input.quality,
+                    image_paths: input.image_paths,
+                })
+                .await
+        }
+    } else if provider_kind == "tencent-hunyuan" {
+        let ai_provider = TencentHunyuanProvider::new(base_url, api_key)?;
+        if input.image_paths.is_empty() {
+            ai_provider
+                .generate_image(ImageGenerateRequest {
+                    prompt: input.prompt,
+                    model,
+                    size: input.size,
+                    quality: input.quality,
+                })
+                .await
+        } else {
+            ai_provider
+                .edit_image(ImageEditRequest {
+                    prompt: input.prompt,
+                    model,
+                    size: input.size,
+                    quality: input.quality,
+                    image_paths: input.image_paths,
+                })
+                .await
+        }
+    } else if provider_kind == "google-gemini" {
+        let ai_provider = GoogleGeminiProvider::new(base_url, api_key);
+        if input.image_paths.is_empty() {
+            ai_provider
+                .generate_image(ImageGenerateRequest {
+                    prompt: input.prompt,
+                    model,
+                    size: input.size,
+                    quality: input.quality,
+                })
+                .await
+        } else {
+            ai_provider
+                .edit_image(ImageEditRequest {
+                    prompt: input.prompt,
+                    model,
+                    size: input.size,
+                    quality: input.quality,
+                    image_paths: input.image_paths,
+                })
+                .await
+        }
+    } else {
+        let ai_provider = OpenAiCompatibleProvider::new(base_url, api_key);
+        if input.image_paths.is_empty() {
+            ai_provider
+                .generate_image(ImageGenerateRequest {
+                    prompt: input.prompt,
+                    model,
+                    size: input.size,
+                    quality: input.quality,
+                })
+                .await
+        } else {
+            ai_provider
+                .edit_image(ImageEditRequest {
+                    prompt: input.prompt,
+                    model,
+                    size: input.size,
+                    quality: input.quality,
+                    image_paths: input.image_paths,
+                })
+                .await
+        }
+    }
 }

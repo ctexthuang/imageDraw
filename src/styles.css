@@ -193,8 +193,20 @@ button.mini {
   color: var(--accent);
 }
 
-.rail-settings {
+.rail-bottom {
+  display: grid;
+  gap: 8px;
   margin-top: auto;
+  width: 100%;
+}
+
+.rail-button.has-update {
+  color: var(--accent);
+}
+
+.rail-button.has-update span {
+  background: var(--accent-soft);
+  color: var(--accent);
 }
 
 .app-stage {
@@ -613,11 +625,35 @@ small {
   padding: 7px 10px;
 }
 
-.generate-button {
+.generation-actions {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: 5fr 1fr;
+}
+
+.generate-button,
+.stop-button {
   border-radius: 8px;
+  min-height: 42px;
+}
+
+.generate-button {
   box-shadow: 0 8px 18px rgba(22, 119, 255, 0.2);
   font-size: 14px;
-  min-height: 42px;
+}
+
+.stop-button {
+  background: var(--danger-soft);
+  border-color: #ffccc7;
+  color: var(--danger);
+  font-size: 16px;
+  padding: 0;
+}
+
+.stop-button:hover:not(:disabled) {
+  background: #ffccc7;
+  border-color: #ffa39e;
+  box-shadow: 0 6px 16px rgba(255, 77, 79, 0.18);
 }
 
 .status {
@@ -1059,6 +1095,7 @@ small {
   border-top: 1px solid var(--border);
   display: grid;
   gap: 8px;
+  min-height: 190px;
   padding-top: 8px;
 }
 
@@ -1076,6 +1113,8 @@ small {
   gap: 8px;
   list-style: none;
   margin: 0;
+  max-height: 180px;
+  overflow: auto;
   padding: 0;
 }
 
@@ -1125,6 +1164,43 @@ small {
   padding: 0 10px;
 }
 
+.update-summary {
+  background: #ffffff;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  display: grid;
+  gap: 3px;
+  padding: 8px 10px;
+}
+
+.update-summary.has-update {
+  border-color: #91caff;
+}
+
+.update-summary strong {
+  color: #111827;
+  font-size: 13px;
+}
+
+.update-summary span,
+.update-summary small {
+  color: var(--muted);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.update-actions {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.update-actions button {
+  min-height: 30px;
+  min-width: 0;
+  padding: 4px 8px;
+}
+
 .preview-modal {
   animation: fadeUp 0.18s ease-out;
   display: grid;
@@ -1137,6 +1213,80 @@ small {
   top: 50%;
   transform: translate(-50%, -50%);
   width: 860px;
+}
+
+.gallery-modal {
+  animation: fadeUp 0.18s ease-out;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: var(--shadow);
+  display: grid;
+  left: 50%;
+  overflow: hidden;
+  position: absolute;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  width: min(92vw, 560px);
+}
+
+.update-modal {
+  animation: fadeUp 0.18s ease-out;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: var(--shadow);
+  display: grid;
+  left: 50%;
+  overflow: hidden;
+  position: absolute;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  width: min(92vw, 520px);
+}
+
+.update-modal-body {
+  display: grid;
+  gap: 12px;
+  padding: 14px 16px 16px;
+}
+
+.gallery-body {
+  display: grid;
+  gap: 12px;
+  padding: 14px 16px 16px;
+}
+
+.gallery-path-box {
+  background: var(--panel-subtle);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  display: grid;
+  gap: 5px;
+  padding: 10px;
+}
+
+.gallery-path-box span {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.gallery-path-box strong {
+  color: #111827;
+  font-size: 13px;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.gallery-actions {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.gallery-actions button {
+  min-height: 34px;
 }
 
 .preview-modal img {
@@ -1234,9 +1384,11 @@ small {
     min-width: 58px;
   }
 
-  .rail-settings {
+  .rail-bottom {
+    display: flex;
     margin-left: auto;
     margin-top: 0;
+    width: auto;
   }
 
   .app-stage {

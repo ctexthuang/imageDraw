@@ -266,3 +266,24 @@ pub async fn create_image_asset(
         created_at: now,
     })
 }
+
+pub async fn update_image_asset_paths(
+    pool: &SqlitePool,
+    moved_paths: &[(String, String)],
+) -> Result<(), AppError> {
+    for (old_path, new_path) in moved_paths {
+        sqlx::query(
+            r#"
+            UPDATE image_assets
+            SET file_path = ?2
+            WHERE file_path = ?1
+            "#,
+        )
+        .bind(old_path)
+        .bind(new_path)
+        .execute(pool)
+        .await?;
+    }
+
+    Ok(())
+}

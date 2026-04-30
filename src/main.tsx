@@ -1,6 +1,15 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import ReactDOM from 'react-dom/client';
-import { FolderOpenOutlined, PictureOutlined, RobotOutlined, SettingOutlined } from '@ant-design/icons';
+import {
+  CloudDownloadOutlined,
+  FolderOpenOutlined,
+  PictureOutlined,
+  RobotOutlined,
+  SettingOutlined,
+  StopOutlined,
+  SyncOutlined,
+  VerticalAlignTopOutlined,
+} from '@ant-design/icons';
 import { convertFileSrc, invoke } from '@tauri-apps/api/core';
 import appLogo from './assets/logo.svg';
 import './styles.css';
@@ -61,9 +70,40 @@ type GenerationStep = {
   status: 'pending' | 'active' | 'done' | 'error';
 };
 
+type UpdateInfo = {
+  current_version: string;
+  latest_version: string;
+  latest_tag: string;
+  release_name: string;
+  release_url: string;
+  release_notes: string;
+  published_at?: string | null;
+  has_update: boolean;
+  asset?: {
+    name: string;
+    download_url: string;
+  } | null;
+};
+
+type GalleryDirectoryInfo = {
+  directory: string;
+  is_custom: boolean;
+};
+
+type SetGalleryDirectoryOutput = {
+  directory: GalleryDirectoryInfo;
+  moved_paths: Array<{
+    old_path: string;
+    new_path: string;
+  }>;
+};
+
 function formatError(error: unknown) {
   const message =
     typeof error === 'string' ? error : error instanceof Error ? error.message : JSON.stringify(error);
+  if (message.includes('生成已强制停止')) {
+    return '生成已强制停止';
+  }
   if (message.includes('502 Bad Gateway') || message.includes('upstream_error')) {
     return '上游模型服务返回 502。通常是中转站或模型供应商临时失败，不是本地程序错误；可以换模型、降低分辨率，或稍后/换供应商重试。';
   }
@@ -284,6 +324,10 @@ function providerSettingsTip(kind: string) {
   return 'Base URL 填 API 地址，通常以 /v1 结尾。';
 }
 
+function createRequestId() {
+  return window.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
 function App() {
   const [providers, setProviders] = useState<ProviderConfig[]>([]);
   const [providerForm, setProviderForm] = useState<ProviderForm>(defaultProviderForm);
@@ -297,8 +341,18 @@ function App() {
   const [status, setStatus] = useState('准备就绪');
   const [settingsStatus, setSettingsStatus] = useState('');
   const [isBusy, setIsBusy] = useState(false);
+  const [activeGenerationRequestId, setActiveGenerationRequestId] = useState<string | null>(null);
   const [isFetchingModels, setIsFetchingModels] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [isGalleryOpen, setIsGalleryOpen] = useState(false);
+  const [isUpdatingGalleryDirectory, setIsUpdatingGalleryDirectory] = useState(false);
+  const [galleryInfo, setGalleryInfo] = useState<GalleryDirectoryInfo | null>(null);
+  const [galleryStatus, setGalleryStatus] = useState('');
+  const [isCheckingUpdate, setIsCheckingUpdate] = useState(false);
+  const [isUpdateOpen, setIsUpdateOpen] = useState(false);
+  const autoUpdateDismissedRef = useRef(false);
+  const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null);
+  const [updateStatus, setUpdateStatus] = useState('');
   const [previewImage, setPreviewImage] = useState<SessionImage | null>(null);
   const [sessionImages, setSessionImages] = useState<SessionImage[]>([]);
   const [materialPaths, setMaterialPaths] = useState<string[]>([]);
@@ -443,6 +497,7 @@ function App() {
         enabled: current.enabled,
       }));
     }
+    return result;
   }
 
   async function saveProvider() {
@@ -479,9 +534,10 @@ function App() {
     setStatus('正在删除配置...');
     setSettingsStatus('正在删除配置...');
     try {
+      const wasSelected = providerForm.id === id;
       await invoke('delete_provider', { id });
-      await refreshProviders();
-      if (providerForm.id === id) {
+      const remainingProviders = await refreshProviders();
+      if (wasSelected && remainingProviders.length === 0) {
         setProviderForm(defaultProviderForm);
         setFetchedImageModels([]);
         setSelectedImageModels([]);
@@ -544,6 +600,8 @@ function App() {
       return;
     }
     setIsBusy(true);
+    const requestId = createRequestId();
+    setActiveGenerationRequestId(requestId);
     setGenerationSteps(initialGenerationSteps);
     setStatus('正在生成图片...');
     try {
@@ -555,6 +613,7 @@ function App() {
       const result = await invoke<GenerateImageOutput>('generate_image', {
         input: {
           provider_id: providerForm.id,
+          request_id: requestId,
           prompt,
           model: selectedImageModel,
           size: imageSize,
@@ -581,9 +640,21 @@ function App() {
       setGenerationSteps((steps) =>
         steps.map((step) => (step.status === 'active' ? { ...step, status: 'error' } : step)),
       );
-      setStatus(`生成失败：${formatError(error)}`);
+      const message = formatError(error);
+      setStatus(message.includes('生成已强制停止') ? '已强制停止生成' : `生成失败：${message}`);
     } finally {
       setIsBusy(false);
+      setActiveGenerationRequestId(null);
+    }
+  }
+
+  async function stopGeneration() {
+    if (!activeGenerationRequestId) return;
+    setStatus('正在强制停止生成...');
+    try {
+      await invoke('cancel_generation', { requestId: activeGenerationRequestId });
+    } catch (error) {
+      setStatus(`停止失败：${formatError(error)}`);
     }
   }
 
@@ -622,8 +693,116 @@ function App() {
     }
   }
 
+  async function refreshGalleryDirectory() {
+    const result = await invoke<GalleryDirectoryInfo>('get_gallery_directory');
+    setGalleryInfo(result);
+    return result;
+  }
+
+  async function openGalleryManager() {
+    setIsGalleryOpen(true);
+    setGalleryStatus('');
+    try {
+      await refreshGalleryDirectory();
+    } catch (error) {
+      setGalleryStatus(`读取图库目录失败：${formatError(error)}`);
+    }
+  }
+
+  async function chooseGalleryDirectory() {
+    setIsUpdatingGalleryDirectory(true);
+    setGalleryStatus('请选择新的图库目录...');
+    try {
+      const directory = await invoke<string | null>('pick_gallery_directory');
+      if (!directory) {
+        setGalleryStatus('未选择目录');
+        return;
+      }
+      const result = await invoke<SetGalleryDirectoryOutput>('set_gallery_directory', { directory });
+      setGalleryInfo(result.directory);
+      if (result.moved_paths.length > 0) {
+        const movedPathMap = new Map(result.moved_paths.map((path) => [path.old_path, path.new_path]));
+        setSessionImages((images) =>
+          images.map((image) => ({
+            ...image,
+            file_path: movedPathMap.get(image.file_path) ?? image.file_path,
+          })),
+        );
+      }
+      setGalleryStatus(
+        result.moved_paths.length > 0
+          ? `图库目录已更新，已迁移 ${result.moved_paths.length} 张图片`
+          : '图库目录已更新',
+      );
+    } catch (error) {
+      setGalleryStatus(`设置图库目录失败：${formatError(error)}`);
+    } finally {
+      setIsUpdatingGalleryDirectory(false);
+    }
+  }
+
+  async function openCurrentGalleryDirectory() {
+    try {
+      await invoke('open_generated_dir');
+      if (!galleryInfo) {
+        await refreshGalleryDirectory();
+      }
+      setGalleryStatus('已打开当前目录');
+    } catch (error) {
+      setGalleryStatus(`打开当前目录失败：${formatError(error)}`);
+    }
+  }
+
+  async function checkForUpdates(options?: { silent?: boolean; autoOpen?: boolean }) {
+    setIsCheckingUpdate(true);
+    if (!options?.silent) {
+      setUpdateStatus('正在检查 GitHub Releases...');
+    }
+    try {
+      const result = await invoke<UpdateInfo>('check_for_updates');
+      setUpdateInfo(result);
+      if (result.has_update) {
+        setUpdateStatus(`发现新版本 ${result.latest_tag}`);
+        if (options?.autoOpen && !autoUpdateDismissedRef.current) {
+          setIsUpdateOpen(true);
+        }
+      } else if (!options?.silent) {
+        setUpdateStatus(`当前已是最新版本 ${result.current_version}`);
+      } else {
+        setUpdateStatus('');
+      }
+    } catch (error) {
+      if (!options?.silent) {
+        setUpdateStatus(`检查更新失败：${formatError(error)}`);
+      }
+    } finally {
+      setIsCheckingUpdate(false);
+    }
+  }
+
+  function openUpdateManager() {
+    setIsUpdateOpen(true);
+    if (!updateInfo && !isCheckingUpdate) {
+      checkForUpdates().catch(() => undefined);
+    }
+  }
+
+  function closeUpdateManager() {
+    autoUpdateDismissedRef.current = true;
+    setIsUpdateOpen(false);
+  }
+
+  async function openUpdateUrl(url: string) {
+    try {
+      await invoke('open_update_url', { url });
+    } catch (error) {
+      setUpdateStatus(`打开更新地址失败：${formatError(error)}`);
+    }
+  }
+
   useEffect(() => {
     refreshProviders().catch(() => setStatus('后端未启动或数据库初始化失败'));
+    checkForUpdates({ silent: true, autoOpen: true }).catch(() => undefined);
   }, []);
 
   return (
@@ -641,15 +820,25 @@ function App() {
             <span className="rail-icon"><PictureOutlined /></span>
             <strong>素材</strong>
           </button>
-          <button className="rail-button" title="图库" onClick={openGeneratedDir}>
+          <button className="rail-button" title="图库" onClick={openGalleryManager}>
             <span className="rail-icon"><FolderOpenOutlined /></span>
             <strong>图库</strong>
           </button>
         </nav>
-        <button className="rail-button rail-settings" title="设置" onClick={() => setIsSettingsOpen(true)}>
-          <span className="rail-icon"><SettingOutlined /></span>
-          <strong>设置</strong>
-        </button>
+        <div className="rail-bottom">
+          <button
+            className={`rail-button ${updateInfo?.has_update ? 'has-update' : ''}`}
+            title="软件更新"
+            onClick={openUpdateManager}
+          >
+            <span className="rail-icon"><VerticalAlignTopOutlined /></span>
+            <strong>更新</strong>
+          </button>
+          <button className="rail-button rail-settings" title="设置" onClick={() => setIsSettingsOpen(true)}>
+            <span className="rail-icon"><SettingOutlined /></span>
+            <strong>设置</strong>
+          </button>
+        </div>
       </aside>
 
       <section className="app-stage">
@@ -755,9 +944,20 @@ function App() {
               </div>
             </div>
 
-            <button className="generate-button" onClick={generateImage} disabled={isBusy}>
-              {isBusy ? '正在生成...' : '开始生成'}
-            </button>
+            <div className="generation-actions">
+              <button className="generate-button" onClick={generateImage} disabled={isBusy}>
+                {isBusy ? '正在生成...' : '开始生成'}
+              </button>
+              <button
+                aria-label="强制停止生成"
+                className="stop-button"
+                onClick={stopGeneration}
+                disabled={!isBusy || !activeGenerationRequestId}
+                title="强制停止"
+              >
+                <StopOutlined />
+              </button>
+            </div>
 
             {status !== '准备就绪' && (
               <p className={`status ${isErrorStatus(status) ? 'error' : ''}`}>{status}</p>
@@ -937,8 +1137,102 @@ function App() {
                   </ul>
                 )}
               </div>
+
             </div>
           </aside>
+        </div>
+      )}
+
+      {isGalleryOpen && (
+        <div className="preview-layer">
+          <button className="drawer-mask" onClick={() => setIsGalleryOpen(false)} aria-label="关闭图库设置" />
+          <section className="gallery-modal">
+            <div className="preview-header">
+              <div>
+                <span>图库</span>
+                <h2>存储目录</h2>
+              </div>
+              <button className="ghost" onClick={() => setIsGalleryOpen(false)}>关闭</button>
+            </div>
+
+            <div className="gallery-body">
+              <div className="gallery-path-box">
+                <span>{galleryInfo?.is_custom ? '自定义目录' : '默认目录'}</span>
+                <strong>{galleryInfo?.directory || '正在读取目录...'}</strong>
+              </div>
+
+              {galleryStatus && (
+                <p className={`settings-status ${isErrorStatus(galleryStatus) ? 'error' : ''}`}>
+                  {galleryStatus}
+                </p>
+              )}
+
+              <div className="gallery-actions">
+                <button onClick={chooseGalleryDirectory} disabled={isUpdatingGalleryDirectory}>
+                  {isUpdatingGalleryDirectory ? '处理中...' : '选择目录并迁移'}
+                </button>
+                <button className="ghost" onClick={openCurrentGalleryDirectory}>打开当前目录</button>
+              </div>
+            </div>
+          </section>
+        </div>
+      )}
+
+      {isUpdateOpen && (
+        <div className="preview-layer">
+          <button className="drawer-mask" onClick={closeUpdateManager} aria-label="关闭软件更新" />
+          <section className="update-modal">
+            <div className="preview-header">
+              <div>
+                <span>软件更新</span>
+                <h2>{updateInfo?.has_update ? `发现 ${updateInfo.latest_tag}` : 'GitHub Releases'}</h2>
+              </div>
+              <button className="ghost" onClick={closeUpdateManager}>关闭</button>
+            </div>
+
+            <div className="update-modal-body">
+              {updateInfo ? (
+                <div className={`update-summary ${updateInfo.has_update ? 'has-update' : ''}`}>
+                  <strong>{updateInfo.has_update ? `可更新到 ${updateInfo.latest_tag}` : '当前已是最新版本'}</strong>
+                  <span>当前版本 {updateInfo.current_version}</span>
+                  <span>{updateInfo.release_name}</span>
+                  {updateInfo.asset && <small>{updateInfo.asset.name}</small>}
+                </div>
+              ) : (
+                <div className="update-summary">
+                  <strong>{isCheckingUpdate ? '正在检查更新' : '尚未检查更新'}</strong>
+                  <span>更新来源为 GitHub Releases</span>
+                </div>
+              )}
+
+              {updateStatus && (
+                <p className={`settings-status ${isErrorStatus(updateStatus) ? 'error' : ''}`}>
+                  {updateStatus}
+                </p>
+              )}
+
+              <div className="update-actions">
+                <button className="ghost" onClick={() => checkForUpdates()} disabled={isCheckingUpdate}>
+                  <SyncOutlined spin={isCheckingUpdate} />
+                  {isCheckingUpdate ? '检查中' : '检查更新'}
+                </button>
+                <button
+                  className="ghost"
+                  onClick={() => updateInfo && openUpdateUrl(updateInfo.release_url)}
+                  disabled={!updateInfo}
+                >
+                  打开 Release
+                </button>
+                <button
+                  onClick={() => updateInfo?.asset && openUpdateUrl(updateInfo.asset.download_url)}
+                  disabled={!updateInfo?.asset}
+                >
+                  <CloudDownloadOutlined />
+                  下载更新
+                </button>
+              </div>
+            </div>
+          </section>
         </div>
       )}
 
