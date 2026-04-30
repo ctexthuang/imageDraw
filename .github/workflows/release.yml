@@ -102,7 +102,7 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Build and upload Tauri app
-        uses: tauri-apps/tauri-action@v1
+        uses: tauri-apps/tauri-action@v0.6.2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
@@ -111,4 +111,4 @@ jobs:
           releaseId: ${{ needs.create-release.outputs.release_id }}
           tagName: ${{ github.ref_name }}
           retryAttempts: 2
-          releaseAssetNamePattern: '[name]_[version]_[platform]_[arch][setup][ext]'
+          assetNamePattern: '[name]_[version]_[platform]_[arch][setup][ext]'
