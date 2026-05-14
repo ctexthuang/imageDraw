@@ -14,7 +14,7 @@
     "build": "tauri build",
     "build:mac": "tauri build --bundles app,dmg",
     "build:mac:universal": "tauri build --target universal-apple-darwin --bundles app,dmg",
-    "build:win": "tauri build"
+    "build:win": "tauri build --target x86_64-pc-windows-msvc --bundles nsis,msi"
   },
   "dependencies": {
     "@ant-design/icons": "^6.2.2",
