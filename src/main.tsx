@@ -211,97 +211,44 @@ const initialGenerationSteps: GenerationStep[] = [
 ];
 
 const defaultImageModelOptions: string[] = [];
-const imageQualityOptions = ['auto', 'high', 'medium', 'low'];
-const imageAspectRatioOptions = [
-  {
-    value: '1:1',
-    defaultSize: '1024x1024',
-    sizes: [
-      { value: '1024x1024', label: '1024x1024' },
-      { value: '2048x2048', label: '2048x2048' },
-      { value: '4096x4096', label: '4096x4096 4K' },
-    ],
-  },
-  {
-    value: '1:2',
-    defaultSize: '1024x2048',
-    sizes: [
-      { value: '1024x2048', label: '1024x2048' },
-      { value: '1536x3072', label: '1536x3072' },
-      { value: '2048x4096', label: '2048x4096 4K' },
-    ],
-  },
-  {
-    value: '2:1',
-    defaultSize: '2048x1024',
-    sizes: [
-      { value: '2048x1024', label: '2048x1024' },
-      { value: '3072x1536', label: '3072x1536' },
-      { value: '4096x2048', label: '4096x2048 4K' },
-    ],
-  },
-  {
-    value: '9:16',
-    defaultSize: '1080x1920',
-    sizes: [
-      { value: '1080x1920', label: '1080x1920' },
-      { value: '1440x2560', label: '1440x2560' },
-      { value: '2160x3840', label: '2160x3840 4K' },
-    ],
-  },
-  {
-    value: '16:9',
-    defaultSize: '1920x1080',
-    sizes: [
-      { value: '1920x1080', label: '1920x1080' },
-      { value: '2560x1440', label: '2560x1440' },
-      { value: '3840x2160', label: '3840x2160 4K' },
-    ],
-  },
-  {
-    value: '3:4',
-    defaultSize: '1536x2048',
-    sizes: [
-      { value: '1536x2048', label: '1536x2048' },
-      { value: '2304x3072', label: '2304x3072' },
-      { value: '3072x4096', label: '3072x4096 4K' },
-    ],
-  },
-  {
-    value: '4:3',
-    defaultSize: '2048x1536',
-    sizes: [
-      { value: '2048x1536', label: '2048x1536' },
-      { value: '3072x2304', label: '3072x2304' },
-      { value: '4096x3072', label: '4096x3072 4K' },
-    ],
-  },
-  {
-    value: '名片横版',
-    defaultSize: '1050x600',
-    sizes: [
-      { value: '1050x600', label: '1050x600' },
-      { value: '2100x1200', label: '2100x1200' },
-      { value: '3500x2000', label: '3500x2000' },
-    ],
-  },
-  {
-    value: '名片竖版',
-    defaultSize: '600x1050',
-    sizes: [
-      { value: '600x1050', label: '600x1050' },
-      { value: '1200x2100', label: '1200x2100' },
-      { value: '2000x3500', label: '2000x3500' },
-    ],
-  },
+const imageCountOptions = [1, 2, 3, 4, 5];
+const imageSizeOptions = [
+  { value: 'auto', label: 'auto', aspectRatio: 'auto', shape: 'auto' },
+  { value: '1024x1024', label: '1024x1024', aspectRatio: '1:1', shape: 'square' },
+  { value: '1536x1024', label: '1536x1024', aspectRatio: '3:2', shape: 'landscape' },
+  { value: '1024x1536', label: '1024x1536', aspectRatio: '2:3', shape: 'portrait' },
+  { value: '2048x2048', label: '2048x2048', aspectRatio: '1:1', shape: 'square' },
+  { value: '2048x1152', label: '2048x1152', aspectRatio: '16:9', shape: 'wide' },
+  { value: '3840x2160', label: '3840x2160', aspectRatio: '16:9', shape: 'wide' },
+  { value: '2160x3840', label: '2160x3840', aspectRatio: '9:16', shape: 'tall' },
 ];
 
-function getAspectRatioOption(value: string) {
-  return imageAspectRatioOptions.find((option) => option.value === value) ?? imageAspectRatioOptions[0];
+function getAspectRatioForSize(value: string) {
+  return imageSizeOptions.find((option) => option.value === value)?.aspectRatio ?? 'auto';
 }
 
-function getAspectRatioForSize(value: string) {
-  return imageAspectRatioOptions.find((option) => option.sizes.some((size) => size.value === value));
+function normalizeImageSize(value: string) {
+  return imageSizeOptions.some((option) => option.value === value) ? value : imageSizeOptions[0].value;
+}
+
+function newestFirstModels(models: ProviderModel[]) {
+  return [...models].reverse();
+}
+
+function modelIds(models: ProviderModel[]) {
+  return models.map((model) => model.id);
+}
+
+function selectedModelIdsInOrder(orderedIds: string[], selectedIds?: string[]) {
+  if (!selectedIds || selectedIds.length === 0) {
+    return orderedIds;
+  }
+  const selected = new Set(selectedIds);
+  return orderedIds.filter((id) => selected.has(id));
+}
+
+function selectedOrDefaultModel(orderedIds: string[], selectedId: string) {
+  return orderedIds.includes(selectedId) ? selectedId : (orderedIds[0] ?? '');
 }
 
 function apiKeyPlaceholder(kind: string) {
@@ -335,15 +282,17 @@ function App() {
   const [selectedImageModel, setSelectedImageModel] = useState('');
   const [fetchedImageModels, setFetchedImageModels] = useState<ProviderModel[]>([]);
   const [selectedImageModels, setSelectedImageModels] = useState<string[]>(defaultImageModelOptions);
-  const [imageAspectRatio, setImageAspectRatio] = useState('1:1');
-  const [imageSize, setImageSize] = useState('1024x1024');
-  const [imageQuality, setImageQuality] = useState('auto');
+  const [imageSize, setImageSize] = useState('auto');
+  const [imageCount, setImageCount] = useState(1);
   const [status, setStatus] = useState('准备就绪');
   const [settingsStatus, setSettingsStatus] = useState('');
   const [isBusy, setIsBusy] = useState(false);
-  const [activeGenerationRequestId, setActiveGenerationRequestId] = useState<string | null>(null);
+  const [activeGenerationRequestIds, setActiveGenerationRequestIds] = useState<string[]>([]);
   const [isFetchingModels, setIsFetchingModels] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [isModelPickerOpen, setIsModelPickerOpen] = useState(false);
+  const [isCountPickerOpen, setIsCountPickerOpen] = useState(false);
+  const [isSizePickerOpen, setIsSizePickerOpen] = useState(false);
   const [isGalleryOpen, setIsGalleryOpen] = useState(false);
   const [isUpdatingGalleryDirectory, setIsUpdatingGalleryDirectory] = useState(false);
   const [galleryInfo, setGalleryInfo] = useState<GalleryDirectoryInfo | null>(null);
@@ -353,11 +302,14 @@ function App() {
   const autoUpdateDismissedRef = useRef(false);
   const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null);
   const [updateStatus, setUpdateStatus] = useState('');
+  const paramsRef = useRef<HTMLDivElement | null>(null);
   const [previewImage, setPreviewImage] = useState<SessionImage | null>(null);
   const [sessionImages, setSessionImages] = useState<SessionImage[]>([]);
   const [materialPaths, setMaterialPaths] = useState<string[]>([]);
   const [generationSteps, setGenerationSteps] = useState<GenerationStep[]>(initialGenerationSteps);
-  const selectedAspectRatioOption = getAspectRatioOption(imageAspectRatio);
+  const imageAspectRatio = getAspectRatioForSize(imageSize);
+  const selectedSizeOption =
+    imageSizeOptions.find((option) => option.value === imageSize) ?? imageSizeOptions[0];
   const visibleImageModelOptions =
     selectedImageModels.length > 0 ? selectedImageModels : defaultImageModelOptions;
   const activeProviderName =
@@ -380,12 +332,19 @@ function App() {
     );
   }
 
+  function closeParamPickers() {
+    setIsModelPickerOpen(false);
+    setIsCountPickerOpen(false);
+    setIsSizePickerOpen(false);
+  }
+
   function updateProviderForm<K extends keyof ProviderForm>(key: K, value: ProviderForm[K]) {
     setProviderForm((current) => ({ ...current, [key]: value }));
   }
 
   function updateProviderKind(kind: string) {
     const option = apiKindOptions.find((item) => item.value === kind);
+    closeParamPickers();
     setFetchedImageModels([]);
     setSelectedImageModels([]);
     setSelectedImageModel('');
@@ -400,32 +359,57 @@ function App() {
     }));
   }
 
-  function updateAspectRatio(value: string) {
-    const option = getAspectRatioOption(value);
-    setImageAspectRatio(option.value);
-    setImageSize(option.defaultSize);
+  function updateImageSize(value: string) {
+    setImageSize(normalizeImageSize(value));
   }
 
-  function updateImageSize(value: string) {
-    setImageSize(value);
-    const option = getAspectRatioForSize(value);
-    if (option) {
-      setImageAspectRatio(option.value);
-    }
+  function chooseImageSize(value: string) {
+    updateImageSize(value);
+    closeParamPickers();
+  }
+
+  function chooseImageModel(model: string) {
+    setSelectedImageModel(model);
+    closeParamPickers();
+  }
+
+  function chooseImageCount(count: number) {
+    setImageCount(count);
+    closeParamPickers();
+  }
+
+  function toggleModelPicker() {
+    setIsModelPickerOpen((open) => !open);
+    setIsCountPickerOpen(false);
+    setIsSizePickerOpen(false);
+  }
+
+  function toggleCountPicker() {
+    setIsCountPickerOpen((open) => !open);
+    setIsModelPickerOpen(false);
+    setIsSizePickerOpen(false);
+  }
+
+  function toggleSizePicker() {
+    setIsSizePickerOpen((open) => !open);
+    setIsModelPickerOpen(false);
+    setIsCountPickerOpen(false);
   }
 
   function updateSelectedModelRecords(modelId: string) {
     setSelectedImageModels((current) => {
+      const orderedIds = modelIds(newestFirstModels(fetchedImageModels));
       if (current.includes(modelId)) {
         if (current.length === 1) return current;
-        const next = current.filter((id) => id !== modelId);
+        const next = orderedIds.filter((id) => current.includes(id) && id !== modelId);
         if (selectedImageModel === modelId) {
           setSelectedImageModel(next[0] ?? '');
         }
         return next;
       }
 
-      return [...current, modelId];
+      const nextSelected = new Set([...current, modelId]);
+      return orderedIds.filter((id) => nextSelected.has(id));
     });
   }
 
@@ -437,9 +421,10 @@ function App() {
       const models = await invoke<ProviderModel[]>('fetch_provider_models', {
         input: { ...providerForm, image_model: null },
       });
-      const modelIds = models.map((model) => model.id);
+      const fetchedModelIds = models.map((model) => model.id);
+      const orderedModelIds = [...fetchedModelIds].reverse();
       setFetchedImageModels(models);
-      if (modelIds.length === 0) {
+      if (fetchedModelIds.length === 0) {
         setSelectedImageModels([]);
         setSelectedImageModel('');
         setStatus('未从模型列表中识别到图片模型');
@@ -448,13 +433,13 @@ function App() {
       }
 
       setSelectedImageModels((current) => {
-        const kept = current.filter((model) => modelIds.includes(model));
-        const next = [...kept, ...modelIds.filter((model) => !kept.includes(model))];
-        setSelectedImageModel((selected) => (next.includes(selected) ? selected : (next[0] ?? '')));
+        const kept = orderedModelIds.filter((model) => current.includes(model));
+        const next = [...kept, ...orderedModelIds.filter((model) => !kept.includes(model))];
+        setSelectedImageModel((selected) => selectedOrDefaultModel(next, selected));
         return next;
       });
-      setStatus(`已获取 ${modelIds.length} 个图片模型`);
-      setSettingsStatus(`已获取 ${modelIds.length} 个图片模型`);
+      setStatus(`已获取 ${fetchedModelIds.length} 个图片模型`);
+      setSettingsStatus(`已获取 ${fetchedModelIds.length} 个图片模型`);
     } catch (error) {
       setStatus(`获取模型失败：${formatError(error)}`);
       setSettingsStatus(`获取模型失败：${formatError(error)}`);
@@ -470,21 +455,20 @@ function App() {
     if (current) {
       const capabilities = parseProviderCapabilities(current.capabilities);
       const storedModels = capabilities.image_models ?? [];
-      const storedSelectedModels =
-        capabilities.selected_image_models?.filter((model) =>
-          storedModels.some((storedModel) => storedModel.id === model),
-        ) ?? [];
+      const orderedModelIds = modelIds(newestFirstModels(storedModels));
+      const storedSelectedModels = selectedModelIdsInOrder(
+        orderedModelIds,
+        capabilities.selected_image_models,
+      );
       const nextSelectedModels =
         storedSelectedModels.length > 0
           ? storedSelectedModels
           : storedModels.length > 0
-            ? storedModels.map((model) => model.id)
+            ? orderedModelIds
             : defaultImageModelOptions;
       setFetchedImageModels(storedModels);
       setSelectedImageModels(nextSelectedModels);
-      setSelectedImageModel((model) =>
-        nextSelectedModels.includes(model) ? model : (nextSelectedModels[0] ?? ''),
-      );
+      setSelectedImageModel((selected) => selectedOrDefaultModel(nextSelectedModels, selected));
       setProviderForm((form) => ({
         ...form,
         id: current.id,
@@ -554,6 +538,7 @@ function App() {
   }
 
   function loadProvider(provider: ProviderConfig) {
+    closeParamPickers();
     setProviderForm((form) => ({
       ...form,
       id: provider.id,
@@ -567,21 +552,20 @@ function App() {
     }));
     const capabilities = parseProviderCapabilities(provider.capabilities);
     const storedModels = capabilities.image_models ?? [];
-    const storedSelectedModels =
-      capabilities.selected_image_models?.filter((model) =>
-        storedModels.some((storedModel) => storedModel.id === model),
-      ) ?? [];
+    const orderedModelIds = modelIds(newestFirstModels(storedModels));
+    const storedSelectedModels = selectedModelIdsInOrder(
+      orderedModelIds,
+      capabilities.selected_image_models,
+    );
     const nextSelectedModels =
       storedSelectedModels.length > 0
         ? storedSelectedModels
         : storedModels.length > 0
-          ? storedModels.map((model) => model.id)
+          ? orderedModelIds
           : defaultImageModelOptions;
     setFetchedImageModels(storedModels);
     setSelectedImageModels(nextSelectedModels);
-    setSelectedImageModel((model) =>
-      nextSelectedModels.includes(model) ? model : (nextSelectedModels[0] ?? ''),
-    );
+    setSelectedImageModel(nextSelectedModels[0] ?? '');
     setStatus('已切换模型配置');
     setSettingsStatus('');
   }
@@ -600,42 +584,100 @@ function App() {
       return;
     }
     setIsBusy(true);
-    const requestId = createRequestId();
-    setActiveGenerationRequestId(requestId);
+    closeParamPickers();
+    const totalCount = imageCount;
+    const providerId = providerForm.id;
+    const generationPrompt = prompt;
+    const generationModel = selectedImageModel;
+    const generationSize = imageSize;
+    const generationMaterialPaths = materialPaths;
+    const requestIds = Array.from({ length: totalCount }, () => createRequestId());
+    setActiveGenerationRequestIds(requestIds);
     setGenerationSteps(initialGenerationSteps);
-    setStatus('正在生成图片...');
+    setStatus(`正在生成 ${totalCount} 张图片...`);
     try {
       startStep(0);
       await new Promise((resolve) => window.setTimeout(resolve, 80));
       startStep(1);
       await new Promise((resolve) => window.setTimeout(resolve, 120));
       startStep(2);
-      const result = await invoke<GenerateImageOutput>('generate_image', {
-        input: {
-          provider_id: providerForm.id,
-          request_id: requestId,
-          prompt,
-          model: selectedImageModel,
-          size: imageSize,
-          quality: imageQuality,
-          image_paths: materialPaths,
-        },
-      });
-      startStep(3);
-      await new Promise((resolve) => window.setTimeout(resolve, 120));
-      startStep(4);
-      await refreshProviders();
-      setSessionImages((images) => [
-        {
-          id: result.asset.id,
-          file_path: result.asset.file_path,
-          prompt,
-          created_at: new Date().toLocaleString(),
-        },
-        ...images,
-      ]);
-      setStep(4, 'done');
-      setStatus(`生成完成：${result.asset.file_path}`);
+
+      let saveStepStarted = false;
+      let completedCount = 0;
+      let successCount = 0;
+      let failedCount = 0;
+      const failedMessages: string[] = [];
+      const completedPaths: string[] = [];
+      const progressStatus = () => {
+        const failedText = failedCount > 0 ? `，失败 ${failedCount} 张` : '';
+        return `正在生成 ${totalCount} 张，已完成 ${completedCount}/${totalCount}${failedText}`;
+      };
+
+      await Promise.all(
+        requestIds.map(async (requestId) => {
+          try {
+            const result = await invoke<GenerateImageOutput>('generate_image', {
+              input: {
+                provider_id: providerId,
+                request_id: requestId,
+                prompt: generationPrompt,
+                model: generationModel,
+                size: generationSize === 'auto' ? null : generationSize,
+                image_paths: generationMaterialPaths,
+              },
+            });
+
+            if (!saveStepStarted) {
+              saveStepStarted = true;
+              startStep(3);
+            }
+            completedCount += 1;
+            successCount += 1;
+            completedPaths.push(result.asset.file_path);
+            const createdAt = new Date().toLocaleString();
+            setSessionImages((images) => [
+              {
+                id: result.asset.id,
+                file_path: result.asset.file_path,
+                prompt: generationPrompt,
+                created_at: createdAt,
+              },
+              ...images,
+            ]);
+            setStatus(progressStatus());
+          } catch (error) {
+            completedCount += 1;
+            failedCount += 1;
+            failedMessages.push(formatError(error));
+            setStatus(progressStatus());
+          } finally {
+            setActiveGenerationRequestIds((ids) => ids.filter((id) => id !== requestId));
+          }
+        }),
+      );
+
+      if (successCount > 0) {
+        startStep(4);
+        await refreshProviders();
+        setStep(4, 'done');
+      } else {
+        setGenerationSteps((steps) =>
+          steps.map((step) => (step.status === 'active' ? { ...step, status: 'error' } : step)),
+        );
+      }
+
+      if (failedCount === 0) {
+        setStatus(
+          successCount === 1
+            ? `生成完成：${completedPaths[0]}`
+            : `生成完成：${successCount}/${totalCount} 张`,
+        );
+      } else if (successCount > 0) {
+        setStatus(`生成完成 ${successCount}/${totalCount} 张，失败 ${failedCount} 张：${failedMessages[0]}`);
+      } else {
+        const message = failedMessages[0] ?? '未知错误';
+        setStatus(message.includes('生成已强制停止') ? '已强制停止生成' : `生成失败：${message}`);
+      }
     } catch (error) {
       setGenerationSteps((steps) =>
         steps.map((step) => (step.status === 'active' ? { ...step, status: 'error' } : step)),
@@ -644,15 +686,17 @@ function App() {
       setStatus(message.includes('生成已强制停止') ? '已强制停止生成' : `生成失败：${message}`);
     } finally {
       setIsBusy(false);
-      setActiveGenerationRequestId(null);
+      setActiveGenerationRequestIds([]);
     }
   }
 
   async function stopGeneration() {
-    if (!activeGenerationRequestId) return;
+    if (activeGenerationRequestIds.length === 0) return;
     setStatus('正在强制停止生成...');
     try {
-      await invoke('cancel_generation', { requestId: activeGenerationRequestId });
+      await Promise.all(
+        activeGenerationRequestIds.map((requestId) => invoke('cancel_generation', { requestId })),
+      );
     } catch (error) {
       setStatus(`停止失败：${formatError(error)}`);
     }
@@ -803,7 +847,33 @@ function App() {
   useEffect(() => {
     refreshProviders().catch(() => setStatus('后端未启动或数据库初始化失败'));
     checkForUpdates({ silent: true, autoOpen: true }).catch(() => undefined);
+    closeParamPickers();
   }, []);
+
+  useEffect(() => {
+    if (!isModelPickerOpen && !isCountPickerOpen && !isSizePickerOpen) return undefined;
+
+    function closeParamPopovers(event: PointerEvent) {
+      const target = event.target;
+      if (
+        target instanceof Element
+        && paramsRef.current?.contains(target)
+        && (
+          target.closest('.model-popover-host')
+          || target.closest('.count-popover-host')
+          || target.closest('.size-popover-host')
+        )
+      ) {
+        return;
+      }
+      setIsModelPickerOpen(false);
+      setIsCountPickerOpen(false);
+      setIsSizePickerOpen(false);
+    }
+
+    window.addEventListener('pointerdown', closeParamPopovers);
+    return () => window.removeEventListener('pointerdown', closeParamPopovers);
+  }, [isModelPickerOpen, isCountPickerOpen, isSizePickerOpen]);
 
   return (
     <main className="app-shell">
@@ -865,7 +935,7 @@ function App() {
                 <span>创作区</span>
                 <strong>{activeMode}</strong>
               </div>
-              <small>{imageAspectRatio} / {imageSize} / {imageQuality}</small>
+              <small>{imageAspectRatio} / {imageSize} / {imageCount} 张</small>
             </div>
 
             <label className="field prompt-field">
@@ -900,47 +970,113 @@ function App() {
               </div>
             </div>
 
-            <div className="params-card">
-              <div className="section-heading">
-                <div>
-                  <span>生成参数</span>
-                  <strong>基础</strong>
+            <div className="params-card" ref={paramsRef}>
+              <div className="param-toolbar">
+                <div className="param-popover-host model-popover-host">
+                  <button
+                    aria-expanded={isModelPickerOpen}
+                    className={`param-trigger icon-only ${isModelPickerOpen ? 'active' : ''}`}
+                    disabled={isBusy}
+                    onClick={toggleModelPicker}
+                    title={selectedImageModel || '选择图像模型'}
+                    type="button"
+                  >
+                    <RobotOutlined />
+                    <span>{selectedImageModel || '模型'}</span>
+                  </button>
+                  {isModelPickerOpen && (
+                    <div className="param-popover model-picker-popover">
+                      <div className="model-picker-list">
+                        {visibleImageModelOptions.length === 0 ? (
+                          <p>未获取模型</p>
+                        ) : (
+                          visibleImageModelOptions.map((model) => (
+                            <button
+                              className={`model-picker-item ${selectedImageModel === model ? 'active' : ''}`}
+                              key={model}
+                              onClick={() => chooseImageModel(model)}
+                              type="button"
+                            >
+                              <RobotOutlined />
+                              <span>{model}</span>
+                            </button>
+                          ))
+                        )}
+                      </div>
+                    </div>
+                  )}
                 </div>
-              </div>
-              <div className="params-grid">
-                <label className="field compact-field">
-                  <span>图像模型</span>
-                  <select value={selectedImageModel} onChange={(event) => setSelectedImageModel(event.target.value)} disabled={isBusy}>
-                    {visibleImageModelOptions.length === 0 && <option value="">未获取模型</option>}
-                    {visibleImageModelOptions.map((model) => (
-                      <option key={model} value={model}>{model}</option>
-                    ))}
-                  </select>
-                </label>
-                <label className="field compact-field">
-                  <span>质量</span>
-                  <select value={imageQuality} onChange={(event) => setImageQuality(event.target.value)} disabled={isBusy}>
-                    {imageQualityOptions.map((quality) => (
-                      <option key={quality} value={quality}>{quality}</option>
-                    ))}
-                  </select>
-                </label>
-                <label className="field compact-field">
-                  <span>比例</span>
-                  <select value={imageAspectRatio} onChange={(event) => updateAspectRatio(event.target.value)} disabled={isBusy}>
-                    {imageAspectRatioOptions.map((option) => (
-                      <option key={option.value} value={option.value}>{option.value}</option>
-                    ))}
-                  </select>
-                </label>
-                <label className="field compact-field">
-                  <span>分辨率</span>
-                  <select value={imageSize} onChange={(event) => updateImageSize(event.target.value)} disabled={isBusy}>
-                    {selectedAspectRatioOption.sizes.map((size) => (
-                      <option key={size.value} value={size.value}>{size.label}</option>
-                    ))}
-                  </select>
-                </label>
+
+                <div className="param-popover-host count-popover-host">
+                  <button
+                    aria-expanded={isCountPickerOpen}
+                    className={`param-trigger count-trigger ${isCountPickerOpen ? 'active' : ''}`}
+                    disabled={isBusy}
+                    onClick={toggleCountPicker}
+                    title={`图片数量：${imageCount}`}
+                    type="button"
+                  >
+                    <PictureOutlined />
+                    <span>{imageCount} 张</span>
+                  </button>
+                  {isCountPickerOpen && (
+                    <div className="param-popover count-picker-popover">
+                      <div className="param-popover-title">
+                        <span>配置</span>
+                        <strong>图片数量</strong>
+                      </div>
+                      <div className="choice-options count-options" role="group" aria-label="图片数量">
+                        {imageCountOptions.map((count) => (
+                          <button
+                            aria-pressed={imageCount === count}
+                            className={`choice-option ${imageCount === count ? 'active' : ''}`}
+                            key={count}
+                            onClick={() => chooseImageCount(count)}
+                            type="button"
+                          >
+                            {count}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                <div className="param-popover-host size-popover-host">
+                  <button
+                    aria-expanded={isSizePickerOpen}
+                    className={`param-trigger ${isSizePickerOpen ? 'active' : ''}`}
+                    disabled={isBusy}
+                    onClick={toggleSizePicker}
+                    title={`尺寸：${selectedSizeOption.label}`}
+                    type="button"
+                  >
+                    <SettingOutlined />
+                    <span>{selectedSizeOption.label}</span>
+                  </button>
+                  {isSizePickerOpen && (
+                    <div className="param-popover size-picker-popover">
+                      <div className="param-popover-title">
+                        <span>配置</span>
+                        <strong>尺寸</strong>
+                      </div>
+                      <div className="size-options" role="group" aria-label="尺寸">
+                        {imageSizeOptions.map((size) => (
+                          <button
+                            aria-pressed={imageSize === size.value}
+                            className={`size-option ${imageSize === size.value ? 'active' : ''}`}
+                            key={size.value}
+                            onClick={() => chooseImageSize(size.value)}
+                            type="button"
+                          >
+                            <span className={`size-option-icon ${size.shape}`} aria-hidden="true" />
+                            <span>{size.label}</span>
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
               </div>
             </div>
 
@@ -952,7 +1088,7 @@ function App() {
                 aria-label="强制停止生成"
                 className="stop-button"
                 onClick={stopGeneration}
-                disabled={!isBusy || !activeGenerationRequestId}
+                disabled={!isBusy || activeGenerationRequestIds.length === 0}
                 title="强制停止"
               >
                 <StopOutlined />
@@ -979,7 +1115,7 @@ function App() {
               <div className="empty-state">
                 <img src={appLogo} alt="" />
                 <div>等待首张作品</div>
-                <p>{selectedImageModel || '未获取模型'} / {imageSize} / {imageQuality}</p>
+                <p>{selectedImageModel || '未获取模型'} / {imageSize} / {imageCount} 张</p>
               </div>
             ) : (
               <div className="image-grid">
@@ -1091,7 +1227,7 @@ function App() {
                   <p className="muted model-empty">暂无图片模型</p>
                 ) : (
                   <ul className="model-list">
-                    {fetchedImageModels.map((model) => (
+                    {newestFirstModels(fetchedImageModels).map((model) => (
                       <li key={model.id}>
                         <label className="model-record">
                           <input
