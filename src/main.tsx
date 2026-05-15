@@ -11,6 +11,8 @@ import {
   VerticalAlignTopOutlined,
 } from '@ant-design/icons';
 import { convertFileSrc, invoke } from '@tauri-apps/api/core';
+import { listen } from '@tauri-apps/api/event';
+import { getCurrentWebview } from '@tauri-apps/api/webview';
 import appLogo from './assets/logo.svg';
 import './styles.css';
 
@@ -85,6 +87,16 @@ type UpdateInfo = {
   } | null;
 };
 
+type UpdateDownloadInfo = {
+  file_path: string;
+};
+
+type UpdateDownloadProgress = {
+  downloaded_bytes: number;
+  file_name: string;
+  total_bytes?: number | null;
+};
+
 type GalleryDirectoryInfo = {
   directory: string;
   is_custom: boolean;
@@ -115,6 +127,19 @@ function formatError(error: unknown) {
 
 function isErrorStatus(message: string) {
   return message.includes('失败') || message.includes('为空') || message.startsWith('请先');
+}
+
+function formatBytes(value?: number | null) {
+  if (!value || value <= 0) return '0 B';
+  const units = ['B', 'KB', 'MB', 'GB'];
+  let size = value;
+  let unitIndex = 0;
+  while (size >= 1024 && unitIndex < units.length - 1) {
+    size /= 1024;
+    unitIndex += 1;
+  }
+  const precision = unitIndex === 0 ? 0 : size >= 10 ? 1 : 2;
+  return `${size.toFixed(precision)} ${units[unitIndex]}`;
 }
 
 function parseProviderCapabilities(value?: string | null): ProviderCapabilities {
@@ -251,6 +276,162 @@ function selectedOrDefaultModel(orderedIds: string[], selectedId: string) {
   return orderedIds.includes(selectedId) ? selectedId : (orderedIds[0] ?? '');
 }
 
+const referenceMentionPattern = /@参考图\s*([1-9]\d*)/g;
+
+type ReferenceMentionRange = {
+  end: number;
+  index: number;
+  start: number;
+  text: string;
+};
+
+type PromptHighlightPart = {
+  isReferenceMention: boolean;
+  text: string;
+};
+
+function referenceMentionIndexes(value: string) {
+  return Array.from(value.matchAll(referenceMentionPattern), (match) => Number(match[1]));
+}
+
+function referenceMentionRanges(value: string): ReferenceMentionRange[] {
+  return Array.from(value.matchAll(referenceMentionPattern), (match) => {
+    const start = match.index ?? 0;
+    return {
+      end: start + match[0].length,
+      index: Number(match[1]),
+      start,
+      text: match[0],
+    };
+  });
+}
+
+function referenceMentionCounts(value: string) {
+  const counts = new Map<number, number>();
+  referenceMentionIndexes(value).forEach((index) => {
+    counts.set(index, (counts.get(index) ?? 0) + 1);
+  });
+  return counts;
+}
+
+function removedReferenceMentionIndexes(previousValue: string, nextValue: string) {
+  const previousCounts = referenceMentionCounts(previousValue);
+  const nextCounts = referenceMentionCounts(nextValue);
+  return Array.from(previousCounts.keys())
+    .filter((index) => (nextCounts.get(index) ?? 0) === 0)
+    .sort((a, b) => a - b);
+}
+
+function rewriteReferenceMentionsAfterRemovedIndexes(value: string, removedIndexes: number[]) {
+  if (removedIndexes.length === 0) return value;
+
+  const sortedRemovedIndexes = Array.from(new Set(removedIndexes)).sort((a, b) => a - b);
+  const removedIndexSet = new Set(sortedRemovedIndexes);
+  return value.replace(referenceMentionPattern, (_match, index) => {
+    const originalIndex = Number(index);
+    if (removedIndexSet.has(originalIndex)) return '';
+
+    const shift = sortedRemovedIndexes.filter((removedIndex) => removedIndex < originalIndex).length;
+    return `@参考图${originalIndex - shift}`;
+  });
+}
+
+function promptHighlightParts(value: string, referenceCount: number): PromptHighlightPart[] {
+  const ranges = referenceMentionRanges(value);
+  const parts: PromptHighlightPart[] = [];
+  let cursor = 0;
+
+  ranges.forEach((range) => {
+    if (range.start > cursor) {
+      parts.push({ isReferenceMention: false, text: value.slice(cursor, range.start) });
+    }
+    parts.push({ isReferenceMention: range.index <= referenceCount, text: range.text });
+    cursor = range.end;
+  });
+
+  if (cursor < value.length) {
+    parts.push({ isReferenceMention: false, text: value.slice(cursor) });
+  }
+
+  return parts.length > 0 ? parts : [{ isReferenceMention: false, text: ' ' }];
+}
+
+function linkedReferenceDeletionRange(
+  value: string,
+  start: number,
+  end: number,
+  key: string,
+) {
+  const ranges = referenceMentionRanges(value);
+  if (start === end) {
+    return ranges.find((range) =>
+      key === 'Backspace'
+        ? range.start < start && start <= range.end
+        : range.start <= start && start < range.end,
+    ) ?? null;
+  }
+
+  let nextStart = start;
+  let nextEnd = end;
+  let changed = true;
+  while (changed) {
+    changed = false;
+    ranges.forEach((range) => {
+      const overlaps = range.start < nextEnd && range.end > nextStart;
+      if (!overlaps) return;
+      if (range.start < nextStart) {
+        nextStart = range.start;
+        changed = true;
+      }
+      if (range.end > nextEnd) {
+        nextEnd = range.end;
+        changed = true;
+      }
+    });
+  }
+
+  return nextStart !== start || nextEnd !== end
+    ? { end: nextEnd, index: 0, start: nextStart, text: value.slice(nextStart, nextEnd) }
+    : null;
+}
+
+function invalidReferenceMentionIndex(value: string, referenceCount: number) {
+  return referenceMentionIndexes(value).find((index) => index > referenceCount);
+}
+
+function buildPromptForReferenceImages(value: string, referenceCount: number) {
+  if (referenceCount === 0 || referenceMentionIndexes(value).length === 0) {
+    return value;
+  }
+
+  const normalizedPrompt = value.replace(referenceMentionPattern, (_match, index) => `Image ${Number(index)}`);
+  const referenceLines = Array.from(
+    { length: referenceCount },
+    (_item, index) => `Image ${index + 1}: attached reference image ${index + 1}.`,
+  );
+
+  return [
+    'Reference images are attached in this exact order:',
+    ...referenceLines,
+    'When the user instruction mentions Image N, use the Nth attached reference image.',
+    '',
+    'User instruction:',
+    normalizedPrompt,
+  ].join('\n');
+}
+
+function activeReferenceMention(value: string, cursor: number) {
+  const beforeCursor = value.slice(0, cursor);
+  const start = beforeCursor.lastIndexOf('@');
+  if (start === -1) return null;
+
+  const query = beforeCursor.slice(start + 1);
+  if (query.includes('@') || /\s/.test(query)) return null;
+  if (query && !'参考图'.startsWith(query) && !/^参考图[1-9]\d*$/.test(query)) return null;
+
+  return { start, end: cursor, query };
+}
+
 function apiKeyPlaceholder(kind: string) {
   if (kind === 'tencent-hunyuan') return 'SecretId:SecretKey';
   if (kind === 'google-gemini') return 'Google AI Studio API Key';
@@ -273,6 +454,63 @@ function providerSettingsTip(kind: string) {
 
 function createRequestId() {
   return window.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+const materialImageExtensions = new Set(['png', 'jpg', 'jpeg', 'webp']);
+
+function isMaterialImagePath(path: string) {
+  const cleanPath = path.split(/[?#]/)[0] ?? path;
+  const extension = cleanPath.split('.').pop()?.toLowerCase();
+  return extension ? materialImageExtensions.has(extension) : false;
+}
+
+function fileUriToPath(value: string) {
+  try {
+    const url = new URL(value);
+    if (url.protocol !== 'file:') return '';
+    let path = decodeURIComponent(url.pathname);
+    if (/^\/[A-Za-z]:\//.test(path)) {
+      path = path.slice(1);
+    }
+    return path;
+  } catch {
+    return '';
+  }
+}
+
+function droppedPathsFromDataTransfer(dataTransfer: DataTransfer) {
+  const paths = Array.from(dataTransfer.files)
+    .map((file) => (file as File & { path?: string }).path ?? '')
+    .filter(Boolean);
+  const uriList = dataTransfer
+    .getData('text/uri-list')
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line && !line.startsWith('#'))
+    .map(fileUriToPath)
+    .filter(Boolean);
+  const plainTextPaths = dataTransfer
+    .getData('text/plain')
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .map((line) => (line.startsWith('file:') ? fileUriToPath(line) : line))
+    .filter(Boolean);
+
+  return Array.from(new Set([...paths, ...uriList, ...plainTextPaths]));
+}
+
+function clientPointFromDragPosition(position: {
+  toLogical?: (scaleFactor: number) => { x: number; y: number };
+  x: number;
+  y: number;
+}) {
+  return position.toLogical?.(window.devicePixelRatio || 1) ?? position;
+}
+
+function isPointInsideElement(element: HTMLElement | null, x: number, y: number) {
+  if (!element) return false;
+  const rect = element.getBoundingClientRect();
+  return x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom;
 }
 
 function App() {
@@ -298,14 +536,29 @@ function App() {
   const [galleryInfo, setGalleryInfo] = useState<GalleryDirectoryInfo | null>(null);
   const [galleryStatus, setGalleryStatus] = useState('');
   const [isCheckingUpdate, setIsCheckingUpdate] = useState(false);
+  const [isDownloadingUpdate, setIsDownloadingUpdate] = useState(false);
+  const [isUpdateDownloadPaused, setIsUpdateDownloadPaused] = useState(false);
   const [isUpdateOpen, setIsUpdateOpen] = useState(false);
   const autoUpdateDismissedRef = useRef(false);
   const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null);
+  const [updateDownloadProgress, setUpdateDownloadProgress] = useState<UpdateDownloadProgress | null>(null);
   const [updateStatus, setUpdateStatus] = useState('');
   const paramsRef = useRef<HTMLDivElement | null>(null);
+  const materialDragOriginRef = useRef<{ x: number; y: number } | null>(null);
+  const materialCardRefs = useRef(new Map<string, HTMLElement>());
+  const materialDropZoneRef = useRef<HTMLDivElement | null>(null);
+  const materialDropHoverRef = useRef(false);
+  const promptTextareaRef = useRef<HTMLTextAreaElement | null>(null);
   const [previewImage, setPreviewImage] = useState<SessionImage | null>(null);
   const [sessionImages, setSessionImages] = useState<SessionImage[]>([]);
   const [materialPaths, setMaterialPaths] = useState<string[]>([]);
+  const [draggedMaterialPath, setDraggedMaterialPath] = useState<string | null>(null);
+  const [dragOverMaterialPath, setDragOverMaterialPath] = useState<string | null>(null);
+  const [materialDragOffset, setMaterialDragOffset] = useState({ x: 0, y: 0 });
+  const [isMaterialDropActive, setIsMaterialDropActive] = useState(false);
+  const [promptScrollTop, setPromptScrollTop] = useState(0);
+  const [referenceMentionRange, setReferenceMentionRange] = useState<ReturnType<typeof activeReferenceMention>>(null);
+  const [activeReferenceMentionOptionIndex, setActiveReferenceMentionOptionIndex] = useState(0);
   const [generationSteps, setGenerationSteps] = useState<GenerationStep[]>(initialGenerationSteps);
   const imageAspectRatio = getAspectRatioForSize(imageSize);
   const selectedSizeOption =
@@ -315,6 +568,21 @@ function App() {
   const activeProviderName =
     providers.find((provider) => provider.id === providerForm.id)?.name ?? providerForm.name;
   const activeMode = materialPaths.length > 0 ? '图像编辑' : '文字生成';
+  const referenceMentionOptions = materialPaths
+    .map((path, index) => ({ path, index: index + 1 }))
+    .filter(({ index }) => {
+      const query = referenceMentionRange?.query ?? '';
+      return query === '' || `参考图${index}`.startsWith(query);
+    });
+  const activeReferenceMentionOption =
+    referenceMentionOptions[activeReferenceMentionOptionIndex] ?? referenceMentionOptions[0];
+  const updateDownloadPercent =
+    updateDownloadProgress?.total_bytes
+      ? Math.min(
+          100,
+          Math.round((updateDownloadProgress.downloaded_bytes / updateDownloadProgress.total_bytes) * 100),
+        )
+      : null;
 
   function setStep(index: number, status: GenerationStep['status']) {
     setGenerationSteps((steps) =>
@@ -336,6 +604,111 @@ function App() {
     setIsModelPickerOpen(false);
     setIsCountPickerOpen(false);
     setIsSizePickerOpen(false);
+  }
+
+  function updatePrompt(value: string, cursor: number) {
+    let nextPrompt = value;
+    const promptMentionCount = referenceMentionIndexes(prompt).length;
+    const nextMentionCount = referenceMentionIndexes(value).length;
+    const removedIndexes =
+      nextMentionCount < promptMentionCount
+        ? removedReferenceMentionIndexes(prompt, value).filter((index) => index <= materialPaths.length)
+        : [];
+
+    if (removedIndexes.length > 0) {
+      const removedIndexSet = new Set(removedIndexes);
+      setMaterialPaths((current) => current.filter((_path, index) => !removedIndexSet.has(index + 1)));
+      nextPrompt = rewriteReferenceMentionsAfterRemovedIndexes(value, removedIndexes);
+    }
+
+    const nextCursor = Math.min(cursor, nextPrompt.length);
+    setPrompt(nextPrompt);
+    setReferenceMentionRange(activeReferenceMention(nextPrompt, nextCursor));
+    if (nextPrompt !== value) {
+      window.requestAnimationFrame(() => {
+        promptTextareaRef.current?.setSelectionRange(nextCursor, nextCursor);
+      });
+    }
+  }
+
+  function handleReferenceMentionKeyboard(event: React.KeyboardEvent<HTMLTextAreaElement>) {
+    if (!referenceMentionRange || referenceMentionOptions.length === 0) return false;
+
+    if (event.key === 'ArrowDown') {
+      event.preventDefault();
+      setActiveReferenceMentionOptionIndex((current) => (current + 1) % referenceMentionOptions.length);
+      return true;
+    }
+
+    if (event.key === 'ArrowUp') {
+      event.preventDefault();
+      setActiveReferenceMentionOptionIndex((current) =>
+        (current - 1 + referenceMentionOptions.length) % referenceMentionOptions.length,
+      );
+      return true;
+    }
+
+    if (event.key === 'Enter' || event.key === 'Tab') {
+      event.preventDefault();
+      if (activeReferenceMentionOption) {
+        chooseReferenceMention(activeReferenceMentionOption.index);
+      }
+      return true;
+    }
+
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      setReferenceMentionRange(null);
+      return true;
+    }
+
+    return false;
+  }
+
+  function deleteLinkedReferenceMention(event: React.KeyboardEvent<HTMLTextAreaElement>) {
+    if (event.key !== 'Backspace' && event.key !== 'Delete') return;
+
+    const textarea = event.currentTarget;
+    const deletionRange = linkedReferenceDeletionRange(
+      prompt,
+      textarea.selectionStart,
+      textarea.selectionEnd,
+      event.key,
+    );
+    if (!deletionRange) return;
+
+    event.preventDefault();
+    const nextPrompt = `${prompt.slice(0, deletionRange.start)}${prompt.slice(deletionRange.end)}`;
+    updatePrompt(nextPrompt, deletionRange.start);
+    window.requestAnimationFrame(() => {
+      promptTextareaRef.current?.setSelectionRange(deletionRange.start, deletionRange.start);
+    });
+  }
+
+  function handlePromptKeyDown(event: React.KeyboardEvent<HTMLTextAreaElement>) {
+    if (handleReferenceMentionKeyboard(event)) return;
+    deleteLinkedReferenceMention(event);
+  }
+
+  function refreshReferenceMention() {
+    const textarea = promptTextareaRef.current;
+    if (!textarea) return;
+    setReferenceMentionRange(activeReferenceMention(textarea.value, textarea.selectionStart));
+  }
+
+  function chooseReferenceMention(index: number) {
+    const mention = `@参考图${index}`;
+    const textarea = promptTextareaRef.current;
+    const start = referenceMentionRange?.start ?? textarea?.selectionStart ?? prompt.length;
+    const end = referenceMentionRange?.end ?? textarea?.selectionEnd ?? start;
+    const nextPrompt = `${prompt.slice(0, start)}${mention}${prompt.slice(end)}`;
+    const nextCursor = start + mention.length;
+    setPrompt(nextPrompt);
+    setReferenceMentionRange(null);
+    window.requestAnimationFrame(() => {
+      promptTextareaRef.current?.focus();
+      promptTextareaRef.current?.setSelectionRange(nextCursor, nextCursor);
+    });
   }
 
   function updateProviderForm<K extends keyof ProviderForm>(key: K, value: ProviderForm[K]) {
@@ -583,14 +956,20 @@ function App() {
       setStatus('请先保存当前模型供应商配置，再开始生成');
       return;
     }
+    const generationMaterialPaths = materialPaths;
+    const invalidReferenceIndex = invalidReferenceMentionIndex(prompt, generationMaterialPaths.length);
+    if (invalidReferenceIndex) {
+      setStatus(`提示词引用了 @参考图${invalidReferenceIndex}，但当前只有 ${generationMaterialPaths.length} 张参考图`);
+      return;
+    }
     setIsBusy(true);
     closeParamPickers();
     const totalCount = imageCount;
     const providerId = providerForm.id;
-    const generationPrompt = prompt;
+    const displayPrompt = prompt;
+    const generationPrompt = buildPromptForReferenceImages(displayPrompt, generationMaterialPaths.length);
     const generationModel = selectedImageModel;
     const generationSize = imageSize;
-    const generationMaterialPaths = materialPaths;
     const requestIds = Array.from({ length: totalCount }, () => createRequestId());
     setActiveGenerationRequestIds(requestIds);
     setGenerationSteps(initialGenerationSteps);
@@ -639,7 +1018,7 @@ function App() {
               {
                 id: result.asset.id,
                 file_path: result.asset.file_path,
-                prompt: generationPrompt,
+                prompt: displayPrompt,
                 created_at: createdAt,
               },
               ...images,
@@ -710,15 +1089,119 @@ function App() {
         setStatus('未选择素材');
         return;
       }
-      setMaterialPaths((current) => Array.from(new Set([...current, ...paths])));
-      setStatus(`已导入 ${paths.length} 张素材`);
+      addMaterialImages(paths);
     } catch (error) {
       setStatus(`打开素材选择器失败：${formatError(error)}`);
     }
   }
 
+  function addMaterialImages(paths: string[]) {
+    const imagePaths = Array.from(new Set(paths.filter(isMaterialImagePath)));
+    if (imagePaths.length === 0) {
+      setStatus('请导入 PNG/JPG/WEBP 图片');
+      return;
+    }
+
+    const existingPaths = new Set(materialPaths);
+    const nextPaths = imagePaths.filter((path) => !existingPaths.has(path));
+    if (nextPaths.length === 0) {
+      setStatus('这些参考图已导入');
+      return;
+    }
+
+    setMaterialPaths((current) => Array.from(new Set([...current, ...nextPaths])));
+    setStatus(`已导入 ${nextPaths.length} 张参考图`);
+  }
+
+  function handleMaterialDragOver(event: React.DragEvent<HTMLDivElement>) {
+    if (isBusy) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = 'copy';
+    materialDropHoverRef.current = true;
+    setIsMaterialDropActive(true);
+  }
+
+  function handleMaterialDragEnter(event: React.DragEvent<HTMLDivElement>) {
+    if (isBusy) return;
+    event.preventDefault();
+    materialDropHoverRef.current = true;
+    setIsMaterialDropActive(true);
+  }
+
+  function handleMaterialDragLeave(event: React.DragEvent<HTMLDivElement>) {
+    if (
+      event.relatedTarget instanceof Node
+      && event.currentTarget.contains(event.relatedTarget)
+    ) {
+      return;
+    }
+    materialDropHoverRef.current = false;
+    setIsMaterialDropActive(false);
+  }
+
+  function handleMaterialDrop(event: React.DragEvent<HTMLDivElement>) {
+    if (isBusy) return;
+    event.preventDefault();
+    materialDropHoverRef.current = false;
+    setIsMaterialDropActive(false);
+    const paths = droppedPathsFromDataTransfer(event.dataTransfer);
+    if (paths.length === 0) {
+      return;
+    }
+    addMaterialImages(paths);
+  }
+
   function removeMaterialImage(path: string) {
+    const removedIndex = materialPaths.indexOf(path) + 1;
     setMaterialPaths((current) => current.filter((item) => item !== path));
+    if (removedIndex > 0) {
+      setPrompt((current) => rewriteReferenceMentionsAfterRemovedIndexes(current, [removedIndex]));
+      setReferenceMentionRange(null);
+    }
+  }
+
+  function clearMaterialImages() {
+    const removedIndexes = materialPaths.map((_path, index) => index + 1);
+    setMaterialPaths([]);
+    setPrompt((current) => rewriteReferenceMentionsAfterRemovedIndexes(current, removedIndexes));
+    setReferenceMentionRange(null);
+  }
+
+  function moveMaterialImage(sourcePath: string, targetPath: string) {
+    setMaterialPaths((current) => {
+      const sourceIndex = current.indexOf(sourcePath);
+      const targetIndex = current.indexOf(targetPath);
+      if (sourceIndex === -1 || targetIndex === -1 || sourceIndex === targetIndex) return current;
+      const next = [...current];
+      const [movedPath] = next.splice(sourceIndex, 1);
+      next.splice(targetIndex, 0, movedPath);
+      return next;
+    });
+  }
+
+  function setMaterialCardRef(path: string, element: HTMLElement | null) {
+    if (element) {
+      materialCardRefs.current.set(path, element);
+    } else {
+      materialCardRefs.current.delete(path);
+    }
+  }
+
+  function startMaterialDrag(event: React.PointerEvent<HTMLElement>, path: string) {
+    if (isBusy || event.button !== 0) return;
+    if (event.target instanceof Element && event.target.closest('button')) return;
+    event.preventDefault();
+    materialDragOriginRef.current = { x: event.clientX, y: event.clientY };
+    setDraggedMaterialPath(path);
+    setDragOverMaterialPath(null);
+    setMaterialDragOffset({ x: 0, y: 0 });
+  }
+
+  function endMaterialDrag() {
+    materialDragOriginRef.current = null;
+    setDraggedMaterialPath(null);
+    setDragOverMaterialPath(null);
+    setMaterialDragOffset({ x: 0, y: 0 });
   }
 
   async function revealImage(path: string) {
@@ -844,11 +1327,122 @@ function App() {
     }
   }
 
+  async function downloadUpdateAsset() {
+    if (!updateInfo?.asset) return;
+
+    setIsDownloadingUpdate(true);
+    setIsUpdateDownloadPaused(false);
+    if (updateDownloadProgress?.file_name !== updateInfo.asset.name) {
+      setUpdateDownloadProgress({
+        downloaded_bytes: 0,
+        file_name: updateInfo.asset.name,
+        total_bytes: null,
+      });
+    }
+    setUpdateStatus(updateDownloadProgress?.downloaded_bytes ? '正在继续下载...' : '正在下载安装包...');
+    try {
+      const result = await invoke<UpdateDownloadInfo>('download_update_asset', {
+        url: updateInfo.asset.download_url,
+        fileName: updateInfo.asset.name,
+      });
+      setUpdateDownloadProgress((current) =>
+        current
+          ? {
+              ...current,
+              downloaded_bytes: current.total_bytes ?? current.downloaded_bytes,
+            }
+          : current,
+      );
+      setUpdateStatus(`已下载并打开安装包：${result.file_path}`);
+    } catch (error) {
+      const message = formatError(error);
+      if (message.includes('下载已暂停')) {
+        setIsUpdateDownloadPaused(true);
+        setUpdateStatus('下载已暂停，可继续下载');
+      } else if (message.includes('下载已取消')) {
+        setIsUpdateDownloadPaused(false);
+        setUpdateDownloadProgress(null);
+        setUpdateStatus('已关闭下载');
+      } else {
+        setIsUpdateDownloadPaused(false);
+        setUpdateStatus(`下载更新失败：${message}`);
+        setUpdateDownloadProgress(null);
+      }
+    } finally {
+      setIsDownloadingUpdate(false);
+    }
+  }
+
+  async function pauseUpdateDownload() {
+    if (!updateInfo?.asset) return;
+    setUpdateStatus('正在暂停下载...');
+    try {
+      const didPause = await invoke<boolean>('pause_update_download', { fileName: updateInfo.asset.name });
+      if (!didPause) {
+        setIsDownloadingUpdate(false);
+        setIsUpdateDownloadPaused(Boolean(updateDownloadProgress));
+        setUpdateStatus(updateDownloadProgress ? '下载已暂停，可继续下载' : '没有正在下载的安装包');
+      }
+    } catch (error) {
+      setUpdateStatus(`暂停下载失败：${formatError(error)}`);
+    }
+  }
+
+  async function cancelUpdateDownload() {
+    if (!updateInfo?.asset && !updateDownloadProgress?.file_name) return;
+    const fileName = updateInfo?.asset?.name ?? updateDownloadProgress?.file_name;
+    if (!fileName) return;
+
+    setUpdateStatus('正在关闭下载...');
+    try {
+      await invoke('cancel_update_download', { fileName });
+      if (!isDownloadingUpdate) {
+        setIsUpdateDownloadPaused(false);
+        setUpdateDownloadProgress(null);
+        setUpdateStatus('已关闭下载');
+      }
+    } catch (error) {
+      setUpdateStatus(`关闭下载失败：${formatError(error)}`);
+    }
+  }
+
   useEffect(() => {
     refreshProviders().catch(() => setStatus('后端未启动或数据库初始化失败'));
     checkForUpdates({ silent: true, autoOpen: true }).catch(() => undefined);
     closeParamPickers();
   }, []);
+
+  useEffect(() => {
+    let isDisposed = false;
+    let unlisten: (() => void) | undefined;
+
+    listen<UpdateDownloadProgress>('update-download-progress', (event) => {
+      setUpdateDownloadProgress(event.payload);
+    })
+      .then((nextUnlisten) => {
+        if (isDisposed) {
+          nextUnlisten();
+        } else {
+          unlisten = nextUnlisten;
+        }
+      })
+      .catch(() => undefined);
+
+    return () => {
+      isDisposed = true;
+      unlisten?.();
+    };
+  }, []);
+
+  useEffect(() => {
+    setActiveReferenceMentionOptionIndex(0);
+  }, [referenceMentionRange?.query, referenceMentionRange?.start]);
+
+  useEffect(() => {
+    setActiveReferenceMentionOptionIndex((current) =>
+      Math.min(current, Math.max(referenceMentionOptions.length - 1, 0)),
+    );
+  }, [referenceMentionOptions.length]);
 
   useEffect(() => {
     if (!isModelPickerOpen && !isCountPickerOpen && !isSizePickerOpen) return undefined;
@@ -875,6 +1469,121 @@ function App() {
     return () => window.removeEventListener('pointerdown', closeParamPopovers);
   }, [isModelPickerOpen, isCountPickerOpen, isSizePickerOpen]);
 
+  useEffect(() => {
+    let isDisposed = false;
+    let unlisten: (() => void) | undefined;
+
+    getCurrentWebview()
+      .onDragDropEvent((event) => {
+        if (isBusy) {
+          setIsMaterialDropActive(false);
+          return;
+        }
+
+        if (event.payload.type === 'leave') {
+          materialDropHoverRef.current = false;
+          setIsMaterialDropActive(false);
+          return;
+        }
+
+        const point = clientPointFromDragPosition(event.payload.position);
+        const isInsideDropZone = isPointInsideElement(materialDropZoneRef.current, point.x, point.y);
+        if (event.payload.type === 'drop') {
+          materialDropHoverRef.current = false;
+          setIsMaterialDropActive(false);
+          if (event.payload.paths.some(isMaterialImagePath)) {
+            addMaterialImages(event.payload.paths);
+          }
+          return;
+        }
+
+        const isImageDrag =
+          event.payload.type === 'enter' && event.payload.paths.some(isMaterialImagePath);
+        setIsMaterialDropActive(isImageDrag || isInsideDropZone || materialDropHoverRef.current);
+      })
+      .then((nextUnlisten) => {
+        if (isDisposed) {
+          nextUnlisten();
+        } else {
+          unlisten = nextUnlisten;
+        }
+      })
+      .catch(() => undefined);
+
+    return () => {
+      isDisposed = true;
+      unlisten?.();
+    };
+  }, [isBusy, materialPaths]);
+
+  useEffect(() => {
+    if (!draggedMaterialPath) return undefined;
+    const activeDraggedMaterialPath = draggedMaterialPath;
+
+    function moveMaterialDrag(event: PointerEvent) {
+      const origin = materialDragOriginRef.current;
+      if (!origin) return;
+
+      setMaterialDragOffset({
+        x: event.clientX - origin.x,
+        y: event.clientY - origin.y,
+      });
+
+      const sourcePath = activeDraggedMaterialPath;
+      const sourceIndex = materialPaths.indexOf(sourcePath);
+      if (sourceIndex === -1) return;
+
+      let nextTargetPath: string | null = null;
+      for (const targetPath of materialPaths) {
+        if (targetPath === sourcePath) continue;
+
+        const targetElement = materialCardRefs.current.get(targetPath);
+        if (!targetElement) continue;
+
+        const targetRect = targetElement.getBoundingClientRect();
+        const isInsideTarget =
+          event.clientX >= targetRect.left
+          && event.clientX <= targetRect.right
+          && event.clientY >= targetRect.top
+          && event.clientY <= targetRect.bottom;
+        if (!isInsideTarget) continue;
+
+        const targetIndex = materialPaths.indexOf(targetPath);
+        const targetMiddleX = targetRect.left + targetRect.width / 2;
+        const targetMiddleY = targetRect.top + targetRect.height / 2;
+        const sourceRow = Math.floor(sourceIndex / 3);
+        const targetRow = Math.floor(targetIndex / 3);
+        const crossedMiddle =
+          sourceRow === targetRow
+            ? sourceIndex < targetIndex
+              ? event.clientX > targetMiddleX
+              : event.clientX < targetMiddleX
+            : sourceIndex < targetIndex
+              ? event.clientY > targetMiddleY
+              : event.clientY < targetMiddleY;
+
+        nextTargetPath = targetPath;
+        if (crossedMiddle) {
+          moveMaterialImage(sourcePath, targetPath);
+          materialDragOriginRef.current = { x: event.clientX, y: event.clientY };
+          setMaterialDragOffset({ x: 0, y: 0 });
+        }
+        break;
+      }
+
+      setDragOverMaterialPath(nextTargetPath);
+    }
+
+    window.addEventListener('pointermove', moveMaterialDrag);
+    window.addEventListener('pointerup', endMaterialDrag);
+    window.addEventListener('pointercancel', endMaterialDrag);
+    return () => {
+      window.removeEventListener('pointermove', moveMaterialDrag);
+      window.removeEventListener('pointerup', endMaterialDrag);
+      window.removeEventListener('pointercancel', endMaterialDrag);
+    };
+  }, [draggedMaterialPath, materialPaths]);
+
   return (
     <main className="app-shell">
       <aside className="side-rail">
@@ -885,10 +1594,6 @@ function App() {
           <button className="rail-button active" title="生成">
             <span className="rail-icon"><RobotOutlined /></span>
             <strong>生成</strong>
-          </button>
-          <button className="rail-button" title="素材" onClick={pickMaterialImages} disabled={isBusy}>
-            <span className="rail-icon"><PictureOutlined /></span>
-            <strong>素材</strong>
           </button>
           <button className="rail-button" title="图库" onClick={openGalleryManager}>
             <span className="rail-icon"><FolderOpenOutlined /></span>
@@ -938,10 +1643,60 @@ function App() {
               <small>{imageAspectRatio} / {imageSize} / {imageCount} 张</small>
             </div>
 
-            <label className="field prompt-field">
+            <div className="field prompt-field">
               <span>提示词</span>
-              <textarea value={prompt} onChange={(event) => setPrompt(event.target.value)} />
-            </label>
+              <div className="prompt-input-wrap">
+                <div
+                  aria-hidden="true"
+                  className="prompt-highlight"
+                  style={{ transform: `translateY(-${promptScrollTop}px)` }}
+                >
+                  {promptHighlightParts(prompt, materialPaths.length).map((part, index) => (
+                    <span
+                      className={part.isReferenceMention ? 'prompt-linked-reference' : undefined}
+                      key={`${index}-${part.text}`}
+                    >
+                      {part.text}
+                    </span>
+                  ))}
+                </div>
+                <textarea
+                  ref={promptTextareaRef}
+                  value={prompt}
+                  onBlur={() => window.setTimeout(() => setReferenceMentionRange(null), 120)}
+                  onChange={(event) => updatePrompt(event.target.value, event.target.selectionStart)}
+                  onClick={refreshReferenceMention}
+                  onKeyDown={handlePromptKeyDown}
+                  onKeyUp={refreshReferenceMention}
+                  onScroll={(event) => setPromptScrollTop(event.currentTarget.scrollTop)}
+                />
+                {referenceMentionRange && (
+                  <div className="reference-mention-popover" role="listbox">
+                    {materialPaths.length === 0 ? (
+                      <div className="reference-mention-empty">先上传参考图</div>
+                    ) : referenceMentionOptions.length === 0 ? (
+                      <div className="reference-mention-empty">没有匹配的参考图</div>
+                    ) : (
+                      referenceMentionOptions.map((item, optionIndex) => (
+                        <button
+                          aria-selected={optionIndex === activeReferenceMentionOptionIndex}
+                          className={`reference-mention-item ${optionIndex === activeReferenceMentionOptionIndex ? 'active' : ''}`}
+                          key={item.path}
+                          onMouseEnter={() => setActiveReferenceMentionOptionIndex(optionIndex)}
+                          onMouseDown={(event) => event.preventDefault()}
+                          onClick={() => chooseReferenceMention(item.index)}
+                          role="option"
+                          type="button"
+                        >
+                          <img src={convertFileSrc(item.path)} alt="" />
+                          <span>参考图{item.index}</span>
+                        </button>
+                      ))
+                    )}
+                  </div>
+                )}
+              </div>
+            </div>
 
             <div className="material-panel">
               <div className="material-header">
@@ -949,22 +1704,58 @@ function App() {
                   <strong>参考图</strong>
                   <span>{materialPaths.length > 0 ? `${materialPaths.length} 张素材` : '未导入'}</span>
                 </div>
-                {materialPaths.length > 0 && (
-                  <button className="ghost mini" onClick={() => setMaterialPaths([])} disabled={isBusy}>清空</button>
-                )}
+                <div className="material-actions">
+                  <button className="ghost mini" onClick={pickMaterialImages} disabled={isBusy}>上传</button>
+                  {materialPaths.length > 0 && (
+                    <button className="ghost mini" onClick={clearMaterialImages} disabled={isBusy}>清空</button>
+                  )}
+                </div>
               </div>
 
-              <div className="reference-strip">
-                <button className="add-reference-card" onClick={pickMaterialImages} disabled={isBusy}>
-                  <span>+</span>
-                  <strong>参考图</strong>
-                  <small>PNG/JPG/WEBP</small>
-                </button>
+              <div
+                className={`reference-grid ${materialPaths.length === 0 ? 'empty' : ''} ${isMaterialDropActive ? 'drag-active' : ''}`}
+                onDragEnter={handleMaterialDragEnter}
+                onDragLeave={handleMaterialDragLeave}
+                onDragOver={handleMaterialDragOver}
+                onDrop={handleMaterialDrop}
+                ref={materialDropZoneRef}
+              >
+                {materialPaths.length === 0 && (
+                  <div className="reference-empty">
+                    {isMaterialDropActive ? '松开导入参考图' : '未导入参考图'}
+                  </div>
+                )}
                 {materialPaths.map((path, index) => (
-                  <article className="reference-card" key={path}>
+                  <article
+                    className={`reference-card ${isBusy ? 'disabled' : ''} ${draggedMaterialPath === path ? 'dragging' : ''} ${dragOverMaterialPath === path ? 'drag-over' : ''}`}
+                    key={path}
+                    onPointerDown={(event) => startMaterialDrag(event, path)}
+                    onPointerUp={endMaterialDrag}
+                    ref={(element) => setMaterialCardRef(path, element)}
+                    style={
+                      draggedMaterialPath === path
+                        ? ({
+                            '--drag-x': `${materialDragOffset.x}px`,
+                            '--drag-y': `${materialDragOffset.y}px`,
+                          } as React.CSSProperties)
+                        : undefined
+                    }
+                    title={isBusy ? undefined : '拖动调整顺序'}
+                  >
                     <img src={convertFileSrc(path)} alt="素材图片" />
                     <span>{index + 1}</span>
-                    <button onClick={() => removeMaterialImage(path)} disabled={isBusy}>×</button>
+                    <div className="reference-card-actions">
+                      <button
+                        aria-label="移除参考图"
+                        className="reference-card-action reference-card-remove"
+                        disabled={isBusy}
+                        onClick={() => removeMaterialImage(path)}
+                        title="移除"
+                        type="button"
+                      >
+                        ×
+                      </button>
+                    </div>
                   </article>
                 ))}
               </div>
@@ -1347,6 +2138,43 @@ function App() {
                 </p>
               )}
 
+              {updateDownloadProgress && (
+                <div className="update-download-progress">
+                  <div className="update-progress-header">
+                    <span>{updateDownloadProgress.file_name}</span>
+                    <strong>{updateDownloadPercent === null ? '下载中' : `${updateDownloadPercent}%`}</strong>
+                  </div>
+                  <div className="update-progress-track">
+                    <div
+                      className={updateDownloadPercent === null ? 'indeterminate' : ''}
+                      style={updateDownloadPercent === null ? undefined : { width: `${updateDownloadPercent}%` }}
+                    />
+                  </div>
+                  <small>
+                    {formatBytes(updateDownloadProgress.downloaded_bytes)}
+                    {updateDownloadProgress.total_bytes
+                      ? ` / ${formatBytes(updateDownloadProgress.total_bytes)}`
+                      : ''}
+                  </small>
+                  {(isDownloadingUpdate || isUpdateDownloadPaused) && (
+                    <div className="update-progress-actions">
+                      {isDownloadingUpdate ? (
+                        <button className="ghost mini" onClick={pauseUpdateDownload} type="button">
+                          暂停
+                        </button>
+                      ) : (
+                        <button className="ghost mini" onClick={downloadUpdateAsset} type="button">
+                          继续
+                        </button>
+                      )}
+                      <button className="danger mini" onClick={cancelUpdateDownload} type="button">
+                        关闭下载
+                      </button>
+                    </div>
+                  )}
+                </div>
+              )}
+
               <div className="update-actions">
                 <button className="ghost" onClick={() => checkForUpdates()} disabled={isCheckingUpdate}>
                   <SyncOutlined spin={isCheckingUpdate} />
@@ -1360,11 +2188,11 @@ function App() {
                   打开 Release
                 </button>
                 <button
-                  onClick={() => updateInfo?.asset && openUpdateUrl(updateInfo.asset.download_url)}
-                  disabled={!updateInfo?.asset}
+                  onClick={downloadUpdateAsset}
+                  disabled={!updateInfo?.asset || isDownloadingUpdate}
                 >
-                  <CloudDownloadOutlined />
-                  下载更新
+                  <CloudDownloadOutlined spin={isDownloadingUpdate} />
+                  {isDownloadingUpdate ? '下载中' : isUpdateDownloadPaused ? '继续下载' : '下载并安装'}
                 </button>
               </div>
             </div>

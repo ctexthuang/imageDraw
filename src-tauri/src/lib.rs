@@ -51,6 +51,7 @@ pub fn run() {
                 app_handle.manage(AppState {
                     db,
                     cancellations: Arc::new(Mutex::new(HashMap::new())),
+                    update_download_controls: Arc::new(Mutex::new(HashMap::new())),
                 });
                 Ok::<(), AppError>(())
             })?;
@@ -71,7 +72,10 @@ pub fn run() {
             commands::generation::cancel_generation,
             commands::generation::generate_image,
             commands::update::check_for_updates,
+            commands::update::cancel_update_download,
+            commands::update::download_update_asset,
             commands::update::open_update_url,
+            commands::update::pause_update_download,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
