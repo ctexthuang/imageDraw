@@ -5,6 +5,7 @@ use std::{
 
 use base64::{engine::general_purpose, Engine as _};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Manager};
 use uuid::Uuid;
 
@@ -55,6 +56,80 @@ pub fn save_generated_image_bytes(
     })
 }
 
+pub fn import_material_images(
+    app: &AppHandle,
+    paths: Vec<String>,
+) -> Result<Vec<String>, AppError> {
+    let mut imported_paths = Vec::new();
+    for path in paths {
+        let source_path = PathBuf::from(path);
+        if !is_supported_material_image(&source_path) {
+            continue;
+        }
+
+        let metadata = match fs::metadata(&source_path) {
+            Ok(metadata) if metadata.is_file() => metadata,
+            _ => continue,
+        };
+
+        if cfg!(target_os = "windows") {
+            let materials_dir = material_images_dir(app)?;
+            fs::create_dir_all(&materials_dir)?;
+            let Some(extension) = normalized_material_extension(&source_path) else {
+                continue;
+            };
+            let file_name = material_cache_file_name(&source_path, &metadata, extension);
+            let target_path = materials_dir.join(file_name);
+            if !target_path.exists() {
+                fs::copy(&source_path, &target_path)?;
+            }
+            imported_paths.push(target_path.to_string_lossy().to_string());
+        } else {
+            imported_paths.push(source_path.to_string_lossy().to_string());
+        }
+    }
+
+    Ok(imported_paths)
+}
+
+pub fn remove_material_images(app: &AppHandle, paths: Vec<String>) -> Result<(), AppError> {
+    let materials_dir = material_images_dir(app)?;
+    let canonical_materials_dir = match materials_dir.canonicalize() {
+        Ok(path) => path,
+        Err(_) => return Ok(()),
+    };
+
+    for path in paths {
+        let material_path = PathBuf::from(path);
+        let Ok(canonical_material_path) = material_path.canonicalize() else {
+            continue;
+        };
+        if canonical_material_path.starts_with(&canonical_materials_dir)
+            && canonical_material_path.is_file()
+        {
+            let _ = fs::remove_file(canonical_material_path);
+        }
+    }
+
+    Ok(())
+}
+
+pub fn clear_material_image_cache(app: &AppHandle) -> Result<(), AppError> {
+    let materials_dir = material_images_dir(app)?;
+    let Ok(entries) = fs::read_dir(materials_dir) else {
+        return Ok(());
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_file() {
+            let _ = fs::remove_file(path);
+        }
+    }
+
+    Ok(())
+}
+
 pub fn gallery_directory_info(app: &AppHandle) -> Result<GalleryDirectoryInfo, AppError> {
     let settings = read_storage_settings(app)?;
     let is_custom = settings
@@ -85,6 +160,10 @@ pub fn generated_images_dir(app: &AppHandle) -> Result<PathBuf, AppError> {
 
 pub fn default_generated_images_dir(app: &AppHandle) -> Result<PathBuf, AppError> {
     Ok(app.path().app_data_dir()?.join("images").join("generated"))
+}
+
+fn material_images_dir(app: &AppHandle) -> Result<PathBuf, AppError> {
+    Ok(app.path().app_data_dir()?.join("images").join("materials"))
 }
 
 pub fn set_generated_images_dir(
@@ -157,6 +236,40 @@ fn is_same_directory(left: &Path, right: &Path) -> bool {
         (Ok(left), Ok(right)) => left == right,
         _ => false,
     }
+}
+
+fn is_supported_material_image(path: &Path) -> bool {
+    normalized_material_extension(path).is_some()
+}
+
+fn normalized_material_extension(path: &Path) -> Option<&'static str> {
+    let extension = path.extension()?.to_string_lossy().to_ascii_lowercase();
+    match extension.as_str() {
+        "png" => Some("png"),
+        "jpg" | "jpeg" => Some("jpg"),
+        "webp" => Some("webp"),
+        _ => None,
+    }
+}
+
+fn material_cache_file_name(
+    source_path: &Path,
+    metadata: &fs::Metadata,
+    extension: &str,
+) -> String {
+    let mut hasher = Sha256::new();
+    let stable_path = source_path
+        .canonicalize()
+        .unwrap_or_else(|_| source_path.to_path_buf());
+    hasher.update(stable_path.to_string_lossy().as_bytes());
+    hasher.update(metadata.len().to_le_bytes());
+    if let Ok(modified) = metadata.modified() {
+        if let Ok(duration) = modified.duration_since(std::time::UNIX_EPOCH) {
+            hasher.update(duration.as_nanos().to_le_bytes());
+        }
+    }
+    let hash = hex::encode(hasher.finalize());
+    format!("{}.{}", &hash[..24], extension)
 }
 
 fn move_generated_images(from_dir: &Path, to_dir: &Path) -> Result<Vec<MovedImagePath>, AppError> {

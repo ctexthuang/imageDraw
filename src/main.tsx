@@ -248,6 +248,11 @@ const imageSizeOptions = [
   { value: '2160x3840', label: '2160x3840', aspectRatio: '9:16', shape: 'tall' },
 ];
 
+function isTauriRuntime() {
+  return typeof window !== 'undefined'
+    && Boolean((window as Window & { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__);
+}
+
 function getAspectRatioForSize(value: string) {
   return imageSizeOptions.find((option) => option.value === value)?.aspectRatio ?? 'auto';
 }
@@ -617,7 +622,9 @@ function App() {
 
     if (removedIndexes.length > 0) {
       const removedIndexSet = new Set(removedIndexes);
+      const removedPaths = materialPaths.filter((_path, index) => removedIndexSet.has(index + 1));
       setMaterialPaths((current) => current.filter((_path, index) => !removedIndexSet.has(index + 1)));
+      cleanupMaterialImages(removedPaths);
       nextPrompt = rewriteReferenceMentionsAfterRemovedIndexes(value, removedIndexes);
     }
 
@@ -1089,21 +1096,30 @@ function App() {
         setStatus('未选择素材');
         return;
       }
-      addMaterialImages(paths);
+      await addMaterialImages(paths);
     } catch (error) {
       setStatus(`打开素材选择器失败：${formatError(error)}`);
     }
   }
 
-  function addMaterialImages(paths: string[]) {
+  async function addMaterialImages(paths: string[]) {
     const imagePaths = Array.from(new Set(paths.filter(isMaterialImagePath)));
     if (imagePaths.length === 0) {
       setStatus('请导入 PNG/JPG/WEBP 图片');
       return;
     }
 
+    setStatus('正在导入参考图...');
+    let importedPaths: string[];
+    try {
+      importedPaths = await invoke<string[]>('import_material_images', { paths: imagePaths });
+    } catch (error) {
+      setStatus(`导入参考图失败：${formatError(error)}`);
+      return;
+    }
+
     const existingPaths = new Set(materialPaths);
-    const nextPaths = imagePaths.filter((path) => !existingPaths.has(path));
+    const nextPaths = importedPaths.filter((path) => !existingPaths.has(path));
     if (nextPaths.length === 0) {
       setStatus('这些参考图已导入');
       return;
@@ -1111,6 +1127,11 @@ function App() {
 
     setMaterialPaths((current) => Array.from(new Set([...current, ...nextPaths])));
     setStatus(`已导入 ${nextPaths.length} 张参考图`);
+  }
+
+  function cleanupMaterialImages(paths: string[]) {
+    if (paths.length === 0 || isBusy) return;
+    invoke('remove_material_images', { paths }).catch(() => undefined);
   }
 
   function handleMaterialDragOver(event: React.DragEvent<HTMLDivElement>) {
@@ -1148,12 +1169,13 @@ function App() {
     if (paths.length === 0) {
       return;
     }
-    addMaterialImages(paths);
+    void addMaterialImages(paths);
   }
 
   function removeMaterialImage(path: string) {
     const removedIndex = materialPaths.indexOf(path) + 1;
     setMaterialPaths((current) => current.filter((item) => item !== path));
+    cleanupMaterialImages([path]);
     if (removedIndex > 0) {
       setPrompt((current) => rewriteReferenceMentionsAfterRemovedIndexes(current, [removedIndex]));
       setReferenceMentionRange(null);
@@ -1162,6 +1184,7 @@ function App() {
 
   function clearMaterialImages() {
     const removedIndexes = materialPaths.map((_path, index) => index + 1);
+    cleanupMaterialImages(materialPaths);
     setMaterialPaths([]);
     setPrompt((current) => rewriteReferenceMentionsAfterRemovedIndexes(current, removedIndexes));
     setReferenceMentionRange(null);
@@ -1407,6 +1430,7 @@ function App() {
   }
 
   useEffect(() => {
+    invoke('clear_material_image_cache').catch(() => undefined);
     refreshProviders().catch(() => setStatus('后端未启动或数据库初始化失败'));
     checkForUpdates({ silent: true, autoOpen: true }).catch(() => undefined);
     closeParamPickers();
@@ -1470,6 +1494,8 @@ function App() {
   }, [isModelPickerOpen, isCountPickerOpen, isSizePickerOpen]);
 
   useEffect(() => {
+    if (!isTauriRuntime()) return undefined;
+
     let isDisposed = false;
     let unlisten: (() => void) | undefined;
 
@@ -1492,7 +1518,7 @@ function App() {
           materialDropHoverRef.current = false;
           setIsMaterialDropActive(false);
           if (event.payload.paths.some(isMaterialImagePath)) {
-            addMaterialImages(event.payload.paths);
+            void addMaterialImages(event.payload.paths);
           }
           return;
         }
@@ -1662,6 +1688,7 @@ function App() {
                 </div>
                 <textarea
                   ref={promptTextareaRef}
+                  disabled={isBusy}
                   value={prompt}
                   onBlur={() => window.setTimeout(() => setReferenceMentionRange(null), 120)}
                   onChange={(event) => updatePrompt(event.target.value, event.target.selectionStart)}

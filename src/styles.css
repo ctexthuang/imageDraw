@@ -610,8 +610,8 @@ small {
   display: grid;
   gap: 8px;
   grid-template-columns: repeat(3, minmax(0, 1fr));
-  height: 100cqw;
-  max-height: 100cqw;
+  height: min(100cqw, max(220px, calc(100vh - 650px)));
+  max-height: min(100cqw, max(220px, calc(100vh - 650px)));
   min-height: 0;
   overflow-x: hidden;
   overflow-y: auto;
@@ -1871,6 +1871,41 @@ small {
 
   .current-provider {
     min-width: 116px;
+  }
+}
+
+@media (max-height: 900px) {
+  .compose-card {
+    gap: 10px;
+    padding: 12px;
+  }
+
+  .prompt-field {
+    min-height: 170px;
+  }
+
+  .material-panel {
+    padding: 8px;
+  }
+
+  .reference-grid {
+    height: min(100cqw, 260px);
+    max-height: min(100cqw, 260px);
+  }
+}
+
+@media (max-height: 760px) {
+  .section-heading {
+    min-height: 28px;
+  }
+
+  .prompt-field {
+    min-height: 130px;
+  }
+
+  .reference-grid {
+    height: min(100cqw, 210px);
+    max-height: min(100cqw, 210px);
   }
 }
 
