@@ -23,6 +23,11 @@ pub async fn get_gallery_directory(app: AppHandle) -> Result<GalleryDirectoryInf
 }
 
 #[tauri::command]
+pub async fn clear_generated_image_preview_cache(app: AppHandle) -> Result<(), String> {
+    storage::clear_generated_image_preview_cache(&app).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 pub async fn pick_gallery_directory(app: AppHandle) -> Result<Option<String>, String> {
     let directory = app.dialog().file().blocking_pick_folder().and_then(|path| {
         path.as_path()

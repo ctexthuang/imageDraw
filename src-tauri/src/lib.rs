@@ -68,6 +68,7 @@ pub fn run() {
             commands::dialog::remove_material_images,
             commands::file::reveal_path,
             commands::file::open_generated_dir,
+            commands::gallery::clear_generated_image_preview_cache,
             commands::gallery::get_gallery_directory,
             commands::gallery::pick_gallery_directory,
             commands::gallery::set_gallery_directory,

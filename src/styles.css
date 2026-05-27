@@ -482,14 +482,11 @@ small {
   box-shadow: 0 14px 34px rgba(17, 24, 39, 0.14);
   display: grid;
   gap: 4px;
-  left: 12px;
   max-height: 236px;
   overflow: auto;
   padding: 6px;
-  position: absolute;
-  top: 38px;
-  width: min(260px, calc(100% - 24px));
-  z-index: 20;
+  position: fixed;
+  z-index: 1000;
 }
 
 .reference-mention-item {
@@ -607,8 +604,10 @@ small {
 
 .reference-grid {
   align-content: start;
+  align-items: start;
   display: grid;
   gap: 8px;
+  grid-auto-rows: calc((100cqw - 16px) / 3);
   grid-template-columns: repeat(3, minmax(0, 1fr));
   height: min(100cqw, max(220px, calc(100vh - 650px)));
   max-height: min(100cqw, max(220px, calc(100vh - 650px)));
@@ -646,6 +645,7 @@ small {
 .reference-card {
   aspect-ratio: 1;
   border-radius: 8px;
+  height: 100%;
   min-height: 0;
   width: 100%;
 }

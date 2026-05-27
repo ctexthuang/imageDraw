@@ -72,6 +72,14 @@ pub struct ImageAsset {
     pub created_at: String,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct ImageAssetOutput {
+    #[serde(flatten)]
+    pub asset: ImageAsset,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub display_path: Option<String>,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct GenerateImageInput {
     pub provider_id: String,
@@ -86,5 +94,5 @@ pub struct GenerateImageInput {
 #[derive(Debug, Clone, Serialize)]
 pub struct GenerateImageOutput {
     pub task: GenerationTask,
-    pub asset: ImageAsset,
+    pub asset: ImageAssetOutput,
 }

@@ -1,13 +1,15 @@
 use std::{
-    fs,
+    fs::{self, OpenOptions},
+    io::{ErrorKind, Write},
     path::{Path, PathBuf},
+    time::SystemTime,
 };
 
 use base64::{engine::general_purpose, Engine as _};
+use chrono::Local;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Manager};
-use uuid::Uuid;
 
 use crate::AppError;
 
@@ -26,6 +28,7 @@ pub struct GalleryDirectoryInfo {
 pub struct MovedImagePath {
     pub old_path: String,
     pub new_path: String,
+    pub display_path: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize, Serialize)]
@@ -46,9 +49,9 @@ pub fn save_generated_image_bytes(
         "image/webp" => "webp",
         _ => "png",
     };
-    let file_path = images_dir.join(format!("{}.{}", Uuid::new_v4(), extension));
     let file_size = i64::try_from(bytes.len()).unwrap_or(i64::MAX);
-    fs::write(&file_path, bytes)?;
+    let timestamp = Local::now().format("%Y%m%d-%H%M%S").to_string();
+    let file_path = write_unique_generated_image(&images_dir, &timestamp, extension, bytes)?;
 
     Ok(StoredImage {
         file_path,
@@ -130,6 +133,67 @@ pub fn clear_material_image_cache(app: &AppHandle) -> Result<(), AppError> {
     Ok(())
 }
 
+pub fn generated_image_display_path(
+    app: &AppHandle,
+    file_path: &Path,
+) -> Result<Option<String>, AppError> {
+    if !cfg!(target_os = "windows") {
+        return Ok(None);
+    }
+
+    let metadata = match fs::metadata(file_path) {
+        Ok(metadata) if metadata.is_file() => metadata,
+        _ => return Ok(None),
+    };
+    let Some(extension) = normalized_image_extension(file_path) else {
+        return Ok(None);
+    };
+
+    let Ok(previews_dir) = generated_image_previews_dir(app) else {
+        return Ok(None);
+    };
+    if fs::create_dir_all(&previews_dir).is_err() {
+        return Ok(None);
+    }
+    let preview_path = previews_dir.join(image_cache_file_name(file_path, &metadata, extension));
+    if !preview_path.exists() && fs::copy(file_path, &preview_path).is_err() {
+        return Ok(None);
+    }
+
+    Ok(Some(preview_path.to_string_lossy().to_string()))
+}
+
+pub fn clear_generated_image_preview_cache(app: &AppHandle) -> Result<(), AppError> {
+    if !cfg!(target_os = "windows") {
+        return Ok(());
+    }
+
+    let previews_dir = generated_image_previews_dir(app)?;
+    let clear_started_at = SystemTime::now();
+    let Ok(entries) = fs::read_dir(previews_dir) else {
+        return Ok(());
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+
+        if fs::metadata(&path)
+            .and_then(|metadata| metadata.modified())
+            .map(|modified| modified >= clear_started_at)
+            .unwrap_or(false)
+        {
+            continue;
+        }
+
+        let _ = fs::remove_file(path);
+    }
+
+    Ok(())
+}
+
 pub fn gallery_directory_info(app: &AppHandle) -> Result<GalleryDirectoryInfo, AppError> {
     let settings = read_storage_settings(app)?;
     let is_custom = settings
@@ -166,6 +230,44 @@ fn material_images_dir(app: &AppHandle) -> Result<PathBuf, AppError> {
     Ok(app.path().app_data_dir()?.join("images").join("materials"))
 }
 
+fn generated_image_previews_dir(app: &AppHandle) -> Result<PathBuf, AppError> {
+    Ok(app
+        .path()
+        .app_data_dir()?
+        .join("images")
+        .join("generated-previews"))
+}
+
+fn write_unique_generated_image(
+    images_dir: &Path,
+    timestamp: &str,
+    extension: &str,
+    bytes: &[u8],
+) -> Result<PathBuf, AppError> {
+    for index in 0.. {
+        let file_name = if index == 0 {
+            format!("{timestamp}.{extension}")
+        } else {
+            format!("{timestamp}-{index:02}.{extension}")
+        };
+        let file_path = images_dir.join(file_name);
+        match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&file_path)
+        {
+            Ok(mut file) => {
+                file.write_all(bytes)?;
+                return Ok(file_path);
+            }
+            Err(error) if error.kind() == ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error.into()),
+        }
+    }
+
+    unreachable!("unique generated image path search is unbounded")
+}
+
 pub fn set_generated_images_dir(
     app: &AppHandle,
     next_dir: PathBuf,
@@ -180,7 +282,7 @@ pub fn set_generated_images_dir(
     let moved_paths = if is_same_directory(&old_dir, &next_dir) {
         Vec::new()
     } else {
-        move_generated_images(&old_dir, &next_dir)?
+        move_generated_images(app, &old_dir, &next_dir)?
     };
 
     write_storage_settings(
@@ -239,10 +341,14 @@ fn is_same_directory(left: &Path, right: &Path) -> bool {
 }
 
 fn is_supported_material_image(path: &Path) -> bool {
-    normalized_material_extension(path).is_some()
+    normalized_image_extension(path).is_some()
 }
 
 fn normalized_material_extension(path: &Path) -> Option<&'static str> {
+    normalized_image_extension(path)
+}
+
+fn normalized_image_extension(path: &Path) -> Option<&'static str> {
     let extension = path.extension()?.to_string_lossy().to_ascii_lowercase();
     match extension.as_str() {
         "png" => Some("png"),
@@ -257,6 +363,10 @@ fn material_cache_file_name(
     metadata: &fs::Metadata,
     extension: &str,
 ) -> String {
+    image_cache_file_name(source_path, metadata, extension)
+}
+
+fn image_cache_file_name(source_path: &Path, metadata: &fs::Metadata, extension: &str) -> String {
     let mut hasher = Sha256::new();
     let stable_path = source_path
         .canonicalize()
@@ -272,7 +382,11 @@ fn material_cache_file_name(
     format!("{}.{}", &hash[..24], extension)
 }
 
-fn move_generated_images(from_dir: &Path, to_dir: &Path) -> Result<Vec<MovedImagePath>, AppError> {
+fn move_generated_images(
+    app: &AppHandle,
+    from_dir: &Path,
+    to_dir: &Path,
+) -> Result<Vec<MovedImagePath>, AppError> {
     if !from_dir.exists() {
         return Ok(Vec::new());
     }
@@ -297,6 +411,7 @@ fn move_generated_images(from_dir: &Path, to_dir: &Path) -> Result<Vec<MovedImag
         moved.push(MovedImagePath {
             old_path: path.to_string_lossy().to_string(),
             new_path: target.to_string_lossy().to_string(),
+            display_path: generated_image_display_path(app, &target)?,
         });
     }
 

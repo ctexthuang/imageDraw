@@ -1,4 +1,5 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import ReactDOM from 'react-dom/client';
 import {
   CloudDownloadOutlined,
@@ -47,12 +48,14 @@ type GenerateImageOutput = {
   asset: {
     id: string;
     file_path: string;
+    display_path?: string | null;
   };
 };
 
 type SessionImage = {
   id: string;
   file_path: string;
+  display_path?: string | null;
   prompt: string;
   created_at: string;
 };
@@ -107,6 +110,7 @@ type SetGalleryDirectoryOutput = {
   moved_paths: Array<{
     old_path: string;
     new_path: string;
+    display_path?: string | null;
   }>;
 };
 
@@ -127,6 +131,10 @@ function formatError(error: unknown) {
 
 function isErrorStatus(message: string) {
   return message.includes('失败') || message.includes('为空') || message.startsWith('请先');
+}
+
+function imageDisplayPath(image: Pick<SessionImage, 'file_path' | 'display_path'>) {
+  return image.display_path || image.file_path;
 }
 
 function formatBytes(value?: number | null) {
@@ -293,6 +301,13 @@ type ReferenceMentionRange = {
 type PromptHighlightPart = {
   isReferenceMention: boolean;
   text: string;
+};
+
+type ReferenceMentionPopoverPosition = {
+  left: number;
+  maxHeight: number;
+  top: number;
+  width: number;
 };
 
 function referenceMentionIndexes(value: string) {
@@ -553,6 +568,7 @@ function App() {
   const materialCardRefs = useRef(new Map<string, HTMLElement>());
   const materialDropZoneRef = useRef<HTMLDivElement | null>(null);
   const materialDropHoverRef = useRef(false);
+  const promptInputWrapRef = useRef<HTMLDivElement | null>(null);
   const promptTextareaRef = useRef<HTMLTextAreaElement | null>(null);
   const [previewImage, setPreviewImage] = useState<SessionImage | null>(null);
   const [sessionImages, setSessionImages] = useState<SessionImage[]>([]);
@@ -563,6 +579,8 @@ function App() {
   const [isMaterialDropActive, setIsMaterialDropActive] = useState(false);
   const [promptScrollTop, setPromptScrollTop] = useState(0);
   const [referenceMentionRange, setReferenceMentionRange] = useState<ReturnType<typeof activeReferenceMention>>(null);
+  const [referenceMentionPopoverPosition, setReferenceMentionPopoverPosition] =
+    useState<ReferenceMentionPopoverPosition | null>(null);
   const [activeReferenceMentionOptionIndex, setActiveReferenceMentionOptionIndex] = useState(0);
   const [generationSteps, setGenerationSteps] = useState<GenerationStep[]>(initialGenerationSteps);
   const imageAspectRatio = getAspectRatioForSize(imageSize);
@@ -1025,6 +1043,7 @@ function App() {
               {
                 id: result.asset.id,
                 file_path: result.asset.file_path,
+                display_path: result.asset.display_path ?? null,
                 prompt: displayPrompt,
                 created_at: createdAt,
               },
@@ -1271,12 +1290,17 @@ function App() {
       const result = await invoke<SetGalleryDirectoryOutput>('set_gallery_directory', { directory });
       setGalleryInfo(result.directory);
       if (result.moved_paths.length > 0) {
-        const movedPathMap = new Map(result.moved_paths.map((path) => [path.old_path, path.new_path]));
+        const movedPathMap = new Map(result.moved_paths.map((path) => [path.old_path, path]));
         setSessionImages((images) =>
-          images.map((image) => ({
-            ...image,
-            file_path: movedPathMap.get(image.file_path) ?? image.file_path,
-          })),
+          images.map((image) => {
+            const movedPath = movedPathMap.get(image.file_path);
+            if (!movedPath) return image;
+            return {
+              ...image,
+              file_path: movedPath.new_path,
+              display_path: movedPath.display_path ?? null,
+            };
+          }),
         );
       }
       setGalleryStatus(
@@ -1431,6 +1455,7 @@ function App() {
 
   useEffect(() => {
     invoke('clear_material_image_cache').catch(() => undefined);
+    invoke('clear_generated_image_preview_cache').catch(() => undefined);
     refreshProviders().catch(() => setStatus('后端未启动或数据库初始化失败'));
     checkForUpdates({ silent: true, autoOpen: true }).catch(() => undefined);
     closeParamPickers();
@@ -1467,6 +1492,41 @@ function App() {
       Math.min(current, Math.max(referenceMentionOptions.length - 1, 0)),
     );
   }, [referenceMentionOptions.length]);
+
+  useLayoutEffect(() => {
+    if (!referenceMentionRange) {
+      setReferenceMentionPopoverPosition(null);
+      return undefined;
+    }
+
+    function updateReferenceMentionPopoverPosition() {
+      const inputWrap = promptInputWrapRef.current;
+      if (!inputWrap) return;
+
+      const rect = inputWrap.getBoundingClientRect();
+      const viewportPadding = 12;
+      const availableWidth = Math.max(120, window.innerWidth - viewportPadding * 2);
+      const preferredWidth = Math.min(260, Math.max(180, rect.width - 24));
+      const width = Math.min(preferredWidth, availableWidth);
+      const maxLeft = Math.max(viewportPadding, window.innerWidth - width - viewportPadding);
+      const left = Math.min(Math.max(viewportPadding, rect.left + 12), maxLeft);
+      const preferredTop = rect.top + 38;
+      const availableBelow = window.innerHeight - preferredTop - viewportPadding;
+      const maxHeight = Math.min(236, Math.max(96, availableBelow));
+      const top = availableBelow >= 96
+        ? preferredTop
+        : Math.max(viewportPadding, window.innerHeight - maxHeight - viewportPadding);
+      setReferenceMentionPopoverPosition({ left, maxHeight, top, width });
+    }
+
+    updateReferenceMentionPopoverPosition();
+    window.addEventListener('resize', updateReferenceMentionPopoverPosition);
+    window.addEventListener('scroll', updateReferenceMentionPopoverPosition, true);
+    return () => {
+      window.removeEventListener('resize', updateReferenceMentionPopoverPosition);
+      window.removeEventListener('scroll', updateReferenceMentionPopoverPosition, true);
+    };
+  }, [referenceMentionRange, materialPaths.length]);
 
   useEffect(() => {
     if (!isModelPickerOpen && !isCountPickerOpen && !isSizePickerOpen) return undefined;
@@ -1610,8 +1670,47 @@ function App() {
     };
   }, [draggedMaterialPath, materialPaths]);
 
+  const referenceMentionPopover = referenceMentionRange && referenceMentionPopoverPosition
+    ? createPortal(
+        <div
+          className="reference-mention-popover"
+          role="listbox"
+          style={{
+            left: referenceMentionPopoverPosition.left,
+            maxHeight: referenceMentionPopoverPosition.maxHeight,
+            top: referenceMentionPopoverPosition.top,
+            width: referenceMentionPopoverPosition.width,
+          }}
+        >
+          {materialPaths.length === 0 ? (
+            <div className="reference-mention-empty">先上传参考图</div>
+          ) : referenceMentionOptions.length === 0 ? (
+            <div className="reference-mention-empty">没有匹配的参考图</div>
+          ) : (
+            referenceMentionOptions.map((item, optionIndex) => (
+              <button
+                aria-selected={optionIndex === activeReferenceMentionOptionIndex}
+                className={`reference-mention-item ${optionIndex === activeReferenceMentionOptionIndex ? 'active' : ''}`}
+                key={item.path}
+                onMouseEnter={() => setActiveReferenceMentionOptionIndex(optionIndex)}
+                onMouseDown={(event) => event.preventDefault()}
+                onClick={() => chooseReferenceMention(item.index)}
+                role="option"
+                type="button"
+              >
+                <img src={convertFileSrc(item.path)} alt="" />
+                <span>参考图{item.index}</span>
+              </button>
+            ))
+          )}
+        </div>,
+        document.body,
+      )
+    : null;
+
   return (
     <main className="app-shell">
+      {referenceMentionPopover}
       <aside className="side-rail">
         <div className="rail-logo">
           <img src={appLogo} alt="Image Draw AI" />
@@ -1671,7 +1770,7 @@ function App() {
 
             <div className="field prompt-field">
               <span>提示词</span>
-              <div className="prompt-input-wrap">
+              <div className="prompt-input-wrap" ref={promptInputWrapRef}>
                 <div
                   aria-hidden="true"
                   className="prompt-highlight"
@@ -1697,31 +1796,6 @@ function App() {
                   onKeyUp={refreshReferenceMention}
                   onScroll={(event) => setPromptScrollTop(event.currentTarget.scrollTop)}
                 />
-                {referenceMentionRange && (
-                  <div className="reference-mention-popover" role="listbox">
-                    {materialPaths.length === 0 ? (
-                      <div className="reference-mention-empty">先上传参考图</div>
-                    ) : referenceMentionOptions.length === 0 ? (
-                      <div className="reference-mention-empty">没有匹配的参考图</div>
-                    ) : (
-                      referenceMentionOptions.map((item, optionIndex) => (
-                        <button
-                          aria-selected={optionIndex === activeReferenceMentionOptionIndex}
-                          className={`reference-mention-item ${optionIndex === activeReferenceMentionOptionIndex ? 'active' : ''}`}
-                          key={item.path}
-                          onMouseEnter={() => setActiveReferenceMentionOptionIndex(optionIndex)}
-                          onMouseDown={(event) => event.preventDefault()}
-                          onClick={() => chooseReferenceMention(item.index)}
-                          role="option"
-                          type="button"
-                        >
-                          <img src={convertFileSrc(item.path)} alt="" />
-                          <span>参考图{item.index}</span>
-                        </button>
-                      ))
-                    )}
-                  </div>
-                )}
               </div>
             </div>
 
@@ -1940,7 +2014,7 @@ function App() {
                 {sessionImages.map((image) => (
                   <article className="image-card" key={image.id}>
                     <button className="image-preview-button" onClick={() => setPreviewImage(image)}>
-                      <img src={convertFileSrc(image.file_path)} alt={image.prompt} />
+                      <img src={convertFileSrc(imageDisplayPath(image))} alt={image.prompt} />
                     </button>
                     <div>
                       <strong>{image.created_at}</strong>
@@ -2238,7 +2312,7 @@ function App() {
               </div>
               <button className="ghost" onClick={() => setPreviewImage(null)}>关闭</button>
             </div>
-            <img src={convertFileSrc(previewImage.file_path)} alt={previewImage.prompt} />
+            <img src={convertFileSrc(imageDisplayPath(previewImage))} alt={previewImage.prompt} />
             <div className="preview-info">
               <p>{previewImage.prompt}</p>
               <button className="ghost" onClick={() => revealImage(previewImage.file_path)}>在文件夹中显示</button>

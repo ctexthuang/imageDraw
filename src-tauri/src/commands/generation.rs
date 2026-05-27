@@ -15,6 +15,7 @@ use crate::{
     db::{
         models::{
             CreateGenerationTaskInput, GenerateImageInput, GenerateImageOutput, GenerationTask,
+            ImageAssetOutput,
         },
         repository,
     },
@@ -210,6 +211,7 @@ pub async fn generate_image(
     let stored_image =
         storage::save_generated_image_bytes(&app, &image_bytes, &image_result.mime_type)?;
     let file_path = stored_image.file_path.to_string_lossy().to_string();
+    let display_path = storage::generated_image_display_path(&app, &stored_image.file_path)?;
     let asset = repository::create_image_asset(
         &state.db,
         &task.id,
@@ -226,7 +228,10 @@ pub async fn generate_image(
             status: "completed".to_string(),
             ..task
         },
-        asset,
+        asset: ImageAssetOutput {
+            asset,
+            display_path,
+        },
     })
 }
 
