@@ -26,6 +26,8 @@ pub enum AppError {
     Base64(#[from] base64::DecodeError),
     #[error("json error: {0}")]
     Json(#[from] serde_json::Error),
+    #[error("image error: {0}")]
+    Image(#[from] image::ImageError),
     #[error("provider error: {0}")]
     Provider(String),
 }

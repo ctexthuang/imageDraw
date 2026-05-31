@@ -5,6 +5,7 @@ import {
   CloudDownloadOutlined,
   FolderOpenOutlined,
   PictureOutlined,
+  QrcodeOutlined,
   RobotOutlined,
   SettingOutlined,
   StopOutlined,
@@ -40,16 +41,18 @@ type ProviderForm = {
   enabled: boolean;
 };
 
+type ImageAssetResult = {
+  id: string;
+  file_path: string;
+  display_path?: string | null;
+};
+
 type GenerateImageOutput = {
   task: {
     id: string;
     status: string;
   };
-  asset: {
-    id: string;
-    file_path: string;
-    display_path?: string | null;
-  };
+  asset: ImageAssetResult;
 };
 
 type SessionImage = {
@@ -58,6 +61,7 @@ type SessionImage = {
   display_path?: string | null;
   prompt: string;
   created_at: string;
+  workspace?: WorkspacePage;
 };
 
 type ProviderModel = {
@@ -74,6 +78,19 @@ type GenerationStep = {
   label: string;
   status: 'pending' | 'active' | 'done' | 'error';
 };
+
+type WorkspacePage = 'generate' | 'poster';
+
+type QrPositionValue =
+  | 'top-left'
+  | 'top-center'
+  | 'top-right'
+  | 'middle-left'
+  | 'middle-center'
+  | 'middle-right'
+  | 'bottom-left'
+  | 'bottom-center'
+  | 'bottom-right';
 
 type UpdateInfo = {
   current_version: string;
@@ -245,6 +262,17 @@ const initialGenerationSteps: GenerationStep[] = [
 
 const defaultImageModelOptions: string[] = [];
 const imageCountOptions = [1, 2, 3, 4, 5];
+const qrPositionOptions: Array<{ value: QrPositionValue; label: string }> = [
+  { value: 'top-left', label: '左上' },
+  { value: 'top-center', label: '上中' },
+  { value: 'top-right', label: '右上' },
+  { value: 'middle-left', label: '中左' },
+  { value: 'middle-center', label: '居中' },
+  { value: 'middle-right', label: '中右' },
+  { value: 'bottom-left', label: '左下' },
+  { value: 'bottom-center', label: '下中' },
+  { value: 'bottom-right', label: '右下' },
+];
 const imageSizeOptions = [
   { value: 'auto', label: 'auto', aspectRatio: 'auto', shape: 'auto' },
   { value: '1024x1024', label: '1024x1024', aspectRatio: '1:1', shape: 'square' },
@@ -533,7 +561,32 @@ function isPointInsideElement(element: HTMLElement | null, x: number, y: number)
   return x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom;
 }
 
+function qrPositionLabel(value: QrPositionValue) {
+  return qrPositionOptions.find((option) => option.value === value)?.label ?? '右下';
+}
+
+function readImageDimensions(path: string) {
+  return new Promise<{ height: number; width: number } | null>((resolve) => {
+    const image = new Image();
+    image.onload = () => resolve({ height: image.naturalHeight, width: image.naturalWidth });
+    image.onerror = () => resolve(null);
+    image.src = convertFileSrc(path);
+  });
+}
+
+async function qrCodeAspectWarning(path: string) {
+  const dimensions = await readImageDimensions(path);
+  if (!dimensions || dimensions.width === 0 || dimensions.height === 0) {
+    return '建议使用 1:1 图片';
+  }
+  const ratio = dimensions.width / dimensions.height;
+  return ratio >= 0.95 && ratio <= 1.05
+    ? ''
+    : `当前 ${dimensions.width}x${dimensions.height}，建议使用 1:1 图片`;
+}
+
 function App() {
+  const [activeWorkspacePage, setActiveWorkspacePage] = useState<WorkspacePage>('generate');
   const [providers, setProviders] = useState<ProviderConfig[]>([]);
   const [providerForm, setProviderForm] = useState<ProviderForm>(defaultProviderForm);
   const [prompt, setPrompt] = useState('一只赛博朋克风格的橘猫坐在霓虹灯下');
@@ -583,6 +636,9 @@ function App() {
     useState<ReferenceMentionPopoverPosition | null>(null);
   const [activeReferenceMentionOptionIndex, setActiveReferenceMentionOptionIndex] = useState(0);
   const [generationSteps, setGenerationSteps] = useState<GenerationStep[]>(initialGenerationSteps);
+  const [qrCodePath, setQrCodePath] = useState<string | null>(null);
+  const [qrCodeWarning, setQrCodeWarning] = useState('');
+  const [qrPosition, setQrPosition] = useState<QrPositionValue>('bottom-right');
   const imageAspectRatio = getAspectRatioForSize(imageSize);
   const selectedSizeOption =
     imageSizeOptions.find((option) => option.value === imageSize) ?? imageSizeOptions[0];
@@ -590,7 +646,18 @@ function App() {
     selectedImageModels.length > 0 ? selectedImageModels : defaultImageModelOptions;
   const activeProviderName =
     providers.find((provider) => provider.id === providerForm.id)?.name ?? providerForm.name;
-  const activeMode = materialPaths.length > 0 ? '图像编辑' : '文字生成';
+  const activeMode = materialPaths.length > 0 ? '图像编辑' : '文生图';
+  const isPosterPage = activeWorkspacePage === 'poster';
+  const workspaceTitle = isPosterPage ? '海报工作台' : '文生图工作台';
+  const composeTitle = isPosterPage ? '海报' : activeMode;
+  const visibleSessionImages = sessionImages.filter((image) =>
+    (image.workspace ?? 'generate') === activeWorkspacePage,
+  );
+  const resultNoun = isPosterPage ? '海报' : '生成';
+  const isQrPlacementEnabled = Boolean(qrCodePath);
+  const quickMeta = isPosterPage && isQrPlacementEnabled
+    ? `${imageAspectRatio} / ${imageSize} / ${imageCount} 张 / 二维码${qrPositionLabel(qrPosition)}`
+    : `${imageAspectRatio} / ${imageSize} / ${imageCount} 张`;
   const referenceMentionOptions = materialPaths
     .map((path, index) => ({ path, index: index + 1 }))
     .filter(({ index }) => {
@@ -627,6 +694,11 @@ function App() {
     setIsModelPickerOpen(false);
     setIsCountPickerOpen(false);
     setIsSizePickerOpen(false);
+  }
+
+  function switchWorkspacePage(page: WorkspacePage) {
+    setActiveWorkspacePage(page);
+    closeParamPickers();
   }
 
   function updatePrompt(value: string, cursor: number) {
@@ -991,14 +1063,22 @@ function App() {
     closeParamPickers();
     const totalCount = imageCount;
     const providerId = providerForm.id;
-    const displayPrompt = prompt;
-    const generationPrompt = buildPromptForReferenceImages(displayPrompt, generationMaterialPaths.length);
+    const generationWorkspacePage = activeWorkspacePage;
+    const generationIsPoster = generationWorkspacePage === 'poster';
+    const generationResultNoun = generationIsPoster ? '海报' : '图片';
+    const generationQrPosition = qrPosition;
+    const generationQrCodePath = generationIsPoster ? qrCodePath : null;
+    const generationShouldPlaceQrCode = Boolean(generationQrCodePath);
+    const displayPrompt = generationIsPoster && generationShouldPlaceQrCode
+      ? `${prompt}（二维码：${qrPositionLabel(generationQrPosition)}）`
+      : prompt;
+    const generationPrompt = buildPromptForReferenceImages(prompt, generationMaterialPaths.length);
     const generationModel = selectedImageModel;
     const generationSize = imageSize;
     const requestIds = Array.from({ length: totalCount }, () => createRequestId());
     setActiveGenerationRequestIds(requestIds);
     setGenerationSteps(initialGenerationSteps);
-    setStatus(`正在生成 ${totalCount} 张图片...`);
+    setStatus(`正在生成 ${totalCount} 张${generationResultNoun}...`);
     try {
       startStep(0);
       await new Promise((resolve) => window.setTimeout(resolve, 80));
@@ -1014,7 +1094,7 @@ function App() {
       const completedPaths: string[] = [];
       const progressStatus = () => {
         const failedText = failedCount > 0 ? `，失败 ${failedCount} 张` : '';
-        return `正在生成 ${totalCount} 张，已完成 ${completedCount}/${totalCount}${failedText}`;
+        return `正在生成 ${totalCount} 张${generationResultNoun}，已完成 ${completedCount}/${totalCount}${failedText}`;
       };
 
       await Promise.all(
@@ -1028,6 +1108,14 @@ function App() {
                 model: generationModel,
                 size: generationSize === 'auto' ? null : generationSize,
                 image_paths: generationMaterialPaths,
+                poster_qr_overlay: generationQrCodePath
+                  ? {
+                      image_path: generationQrCodePath,
+                      position: generationQrPosition,
+                      size_ratio: 0.18,
+                      margin_ratio: 0.05,
+                    }
+                  : null,
               },
             });
 
@@ -1046,6 +1134,7 @@ function App() {
                 display_path: result.asset.display_path ?? null,
                 prompt: displayPrompt,
                 created_at: createdAt,
+                workspace: generationWorkspacePage,
               },
               ...images,
             ]);
@@ -1072,23 +1161,27 @@ function App() {
       }
 
       if (failedCount === 0) {
+        const doneText = generationIsPoster ? '制作完成' : '生成完成';
         setStatus(
           successCount === 1
-            ? `生成完成：${completedPaths[0]}`
-            : `生成完成：${successCount}/${totalCount} 张`,
+            ? `${doneText}：${completedPaths[0]}`
+            : `${doneText}：${successCount}/${totalCount} 张`,
         );
       } else if (successCount > 0) {
-        setStatus(`生成完成 ${successCount}/${totalCount} 张，失败 ${failedCount} 张：${failedMessages[0]}`);
+        const doneText = generationIsPoster ? '制作完成' : '生成完成';
+        setStatus(`${doneText} ${successCount}/${totalCount} 张，失败 ${failedCount} 张：${failedMessages[0]}`);
       } else {
         const message = failedMessages[0] ?? '未知错误';
-        setStatus(message.includes('生成已强制停止') ? '已强制停止生成' : `生成失败：${message}`);
+        const failText = generationIsPoster ? '制作失败' : '生成失败';
+        setStatus(message.includes('生成已强制停止') ? '已强制停止生成' : `${failText}：${message}`);
       }
     } catch (error) {
       setGenerationSteps((steps) =>
         steps.map((step) => (step.status === 'active' ? { ...step, status: 'error' } : step)),
       );
       const message = formatError(error);
-      setStatus(message.includes('生成已强制停止') ? '已强制停止生成' : `生成失败：${message}`);
+      const failText = generationIsPoster ? '制作失败' : '生成失败';
+      setStatus(message.includes('生成已强制停止') ? '已强制停止生成' : `${failText}：${message}`);
     } finally {
       setIsBusy(false);
       setActiveGenerationRequestIds([]);
@@ -1119,6 +1212,45 @@ function App() {
     } catch (error) {
       setStatus(`打开素材选择器失败：${formatError(error)}`);
     }
+  }
+
+  async function pickQrCodeImage() {
+    setStatus('正在打开二维码图片选择器...');
+    try {
+      const paths = await invoke<string[]>('pick_material_images');
+      const imagePath = paths.find(isMaterialImagePath);
+      if (!imagePath) {
+        setStatus(paths.length === 0 ? '未选择二维码图片' : '请上传 PNG/JPG/WEBP 二维码图片');
+        return;
+      }
+
+      const importedPaths = await invoke<string[]>('import_material_images', { paths: [imagePath] });
+      const importedPath = importedPaths[0];
+      if (!importedPath) {
+        setStatus('二维码图片导入失败');
+        return;
+      }
+
+      if (qrCodePath && qrCodePath !== importedPath) {
+        cleanupMaterialImages([qrCodePath]);
+      }
+
+      setQrCodePath(importedPath);
+      const warning = await qrCodeAspectWarning(importedPath);
+      setQrCodeWarning(warning);
+      setStatus(warning ? `已上传二维码图片，${warning}` : '已上传二维码图片');
+    } catch (error) {
+      setStatus(`上传二维码图片失败：${formatError(error)}`);
+    }
+  }
+
+  function removeQrCodeImage() {
+    if (qrCodePath) {
+      cleanupMaterialImages([qrCodePath]);
+    }
+    setQrCodePath(null);
+    setQrCodeWarning('');
+    setStatus('已移除二维码图片');
   }
 
   async function addMaterialImages(paths: string[]) {
@@ -1716,9 +1848,21 @@ function App() {
           <img src={appLogo} alt="Image Draw AI" />
         </div>
         <nav className="rail-nav" aria-label="主导航">
-          <button className="rail-button active" title="生成">
+          <button
+            className={`rail-button ${activeWorkspacePage === 'generate' ? 'active' : ''}`}
+            title="文生图"
+            onClick={() => switchWorkspacePage('generate')}
+          >
             <span className="rail-icon"><RobotOutlined /></span>
-            <strong>生成</strong>
+            <strong>文生图</strong>
+          </button>
+          <button
+            className={`rail-button ${activeWorkspacePage === 'poster' ? 'active' : ''}`}
+            title="海报"
+            onClick={() => switchWorkspacePage('poster')}
+          >
+            <span className="rail-icon"><QrcodeOutlined /></span>
+            <strong>海报</strong>
           </button>
           <button className="rail-button" title="图库" onClick={openGalleryManager}>
             <span className="rail-icon"><FolderOpenOutlined /></span>
@@ -1746,7 +1890,7 @@ function App() {
           <div className="brand">
             <div>
               <p>Image Draw AI</p>
-              <h1>图像生成工作台</h1>
+              <h1>{workspaceTitle}</h1>
             </div>
           </div>
           <div className="topbar-actions">
@@ -1758,14 +1902,14 @@ function App() {
           </div>
         </header>
 
-        <section className="workspace">
-          <aside className="compose-card">
+        <section className={`workspace ${isPosterPage ? 'poster-workspace' : ''}`}>
+          <aside className={`compose-card ${isPosterPage ? 'poster-compose' : ''}`}>
             <div className="section-heading">
               <div>
                 <span>创作区</span>
-                <strong>{activeMode}</strong>
+                <strong>{composeTitle}</strong>
               </div>
-              <small>{imageAspectRatio} / {imageSize} / {imageCount} 张</small>
+              <small>{quickMeta}</small>
             </div>
 
             <div className="field prompt-field">
@@ -1861,6 +2005,65 @@ function App() {
                 ))}
               </div>
             </div>
+
+            {isPosterPage && (
+              <div className={`poster-options-panel ${isQrPlacementEnabled ? 'has-qr-position' : ''}`}>
+                <div className="poster-options-header">
+                  <div>
+                    <strong>二维码</strong>
+                    <span>
+                      {qrCodePath
+                        ? `${qrPositionLabel(qrPosition)} · ${qrCodeWarning || '1:1'}`
+                        : '请先上传 1:1 图片'}
+                    </span>
+                  </div>
+                  {qrCodePath && (
+                    <div className="qr-preview">
+                      <img src={convertFileSrc(qrCodePath)} alt="二维码图片" />
+                      <span>{qrCodeWarning || '比例合适'}</span>
+                    </div>
+                  )}
+                  <div className="qr-actions">
+                    <button
+                      className={`qr-toggle ${qrCodePath ? 'active' : ''}`}
+                      disabled={isBusy}
+                      onClick={pickQrCodeImage}
+                      type="button"
+                    >
+                      <QrcodeOutlined />
+                      <span>{qrCodePath ? '更换' : '上传二维码'}</span>
+                    </button>
+                    {qrCodePath && (
+                      <button
+                        className="qr-remove-button"
+                        disabled={isBusy}
+                        onClick={removeQrCodeImage}
+                        type="button"
+                      >
+                        移除
+                      </button>
+                    )}
+                  </div>
+                </div>
+
+                {isQrPlacementEnabled && (
+                  <div className="qr-position-grid" role="group" aria-label="二维码位置">
+                    {qrPositionOptions.map((option) => (
+                      <button
+                        aria-pressed={qrPosition === option.value}
+                        className={`qr-position-option ${qrPosition === option.value ? 'active' : ''}`}
+                        disabled={isBusy}
+                        key={option.value}
+                        onClick={() => setQrPosition(option.value)}
+                        type="button"
+                      >
+                        {option.label}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
 
             <div className="params-card" ref={paramsRef}>
               <div className="param-toolbar">
@@ -1974,7 +2177,7 @@ function App() {
 
             <div className="generation-actions">
               <button className="generate-button" onClick={generateImage} disabled={isBusy}>
-                {isBusy ? '正在生成...' : '开始生成'}
+                {isBusy ? `正在${isPosterPage ? '制作' : '生成'}...` : `开始${isPosterPage ? '制作' : '生成'}`}
               </button>
               <button
                 aria-label="强制停止生成"
@@ -1996,22 +2199,22 @@ function App() {
             <div className="section-heading result-heading">
               <div>
                 <span>结果区</span>
-                <strong>本次生成 {sessionImages.length} 张</strong>
+                <strong>本次{resultNoun} {visibleSessionImages.length} 张</strong>
               </div>
               <div className="heading-actions">
                 <button className="ghost mini" onClick={openGeneratedDir}>打开目录</button>
               </div>
             </div>
 
-            {sessionImages.length === 0 ? (
+            {visibleSessionImages.length === 0 ? (
               <div className="empty-state">
                 <img src={appLogo} alt="" />
-                <div>等待首张作品</div>
+                <div>等待首张{isPosterPage ? '海报' : '作品'}</div>
                 <p>{selectedImageModel || '未获取模型'} / {imageSize} / {imageCount} 张</p>
               </div>
             ) : (
               <div className="image-grid">
-                {sessionImages.map((image) => (
+                {visibleSessionImages.map((image) => (
                   <article className="image-card" key={image.id}>
                     <button className="image-preview-button" onClick={() => setPreviewImage(image)}>
                       <img src={convertFileSrc(imageDisplayPath(image))} alt={image.prompt} />
@@ -2030,7 +2233,7 @@ function App() {
             <div className={`progress-card result-progress ${isBusy ? 'is-loading' : ''}`}>
               <div className="spinner" aria-hidden="true" />
               <div className="progress-content">
-                <strong>{isBusy ? '生成中' : '生成流程'}</strong>
+                <strong>{isBusy ? (isPosterPage ? '制作中' : '生成中') : (isPosterPage ? '制作流程' : '生成流程')}</strong>
                 <ol className="step-list">
                   {generationSteps.map((step) => (
                     <li className={`step ${step.status}`} key={step.label}>

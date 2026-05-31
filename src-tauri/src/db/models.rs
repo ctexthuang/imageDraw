@@ -89,6 +89,29 @@ pub struct GenerateImageInput {
     pub size: Option<String>,
     pub quality: Option<String>,
     pub image_paths: Vec<String>,
+    pub poster_qr_overlay: Option<PosterQrOverlayInput>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct PosterQrOverlayInput {
+    pub image_path: String,
+    pub position: PosterQrPosition,
+    pub size_ratio: Option<f32>,
+    pub margin_ratio: Option<f32>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PosterQrPosition {
+    TopLeft,
+    TopCenter,
+    TopRight,
+    MiddleLeft,
+    MiddleCenter,
+    MiddleRight,
+    BottomLeft,
+    BottomCenter,
+    BottomRight,
 }
 
 #[derive(Debug, Clone, Serialize)]
