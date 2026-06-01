@@ -1,4 +1,4 @@
-use std::{collections::HashMap, path::PathBuf, sync::Arc};
+use std::{collections::HashMap, path::PathBuf, sync::Arc, time::Duration};
 
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -7,6 +7,7 @@ use tokio::{
     fs::OpenOptions,
     io::AsyncWriteExt,
     sync::{oneshot, Mutex},
+    time::sleep,
 };
 
 use crate::state::{AppState, UpdateDownloadControl};
@@ -164,6 +165,7 @@ pub async fn download_update_asset(
                 file.flush()
                     .await
                     .map_err(|error| format!("保存安装包失败：{error}"))?;
+                drop(file);
                 match action.unwrap_or(UpdateDownloadControl::Cancel) {
                     UpdateDownloadControl::Pause => {
                         drop(control_guard);
@@ -193,6 +195,10 @@ pub async fn download_update_asset(
     file.flush()
         .await
         .map_err(|error| format!("保存安装包失败：{error}"))?;
+    file.sync_all()
+        .await
+        .map_err(|error| format!("保存安装包失败：{error}"))?;
+    drop(file);
     emit_download_progress(&app, &safe_file_name, downloaded_bytes, total_bytes);
 
     if tokio::fs::metadata(&file_path).await.is_ok() {
@@ -205,6 +211,9 @@ pub async fn download_update_asset(
         .map_err(|error| format!("完成安装包保存失败：{error}"))?;
 
     drop(control_guard);
+    if cfg!(target_os = "windows") {
+        sleep(Duration::from_millis(500)).await;
+    }
     app.opener()
         .open_path(file_path.to_string_lossy().to_string(), None::<&str>)
         .map_err(|error| format!("打开安装包失败：{error}"))?;
