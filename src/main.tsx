@@ -15,7 +15,7 @@ import {
 import { convertFileSrc, invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { getCurrentWebview } from '@tauri-apps/api/webview';
-import appLogo from './assets/logo.svg';
+import appLogo from './assets/logo.png';
 import './styles.css';
 
 type ProviderConfig = {
