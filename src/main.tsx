@@ -81,6 +81,8 @@ type GenerationStep = {
 
 type WorkspacePage = 'generate' | 'poster';
 
+type ThemeMode = 'system' | 'light' | 'dark';
+
 type QrPositionValue =
   | 'top-left'
   | 'top-center'
@@ -131,11 +133,57 @@ type SetGalleryDirectoryOutput = {
   }>;
 };
 
+const themeStorageKey = 'image-draw-ai-theme';
+
+const themeOptions: Array<{ label: string; value: ThemeMode }> = [
+  { value: 'system', label: '跟随系统' },
+  { value: 'light', label: '日间模式' },
+  { value: 'dark', label: '夜间模式' },
+];
+
+function isThemeMode(value: string | null): value is ThemeMode {
+  return value === 'system' || value === 'light' || value === 'dark';
+}
+
+function readStoredThemeMode(): ThemeMode {
+  if (typeof window === 'undefined') return 'system';
+  try {
+    const storedTheme = window.localStorage.getItem(themeStorageKey);
+    return isThemeMode(storedTheme) ? storedTheme : 'system';
+  } catch {
+    return 'system';
+  }
+}
+
+function preferredSystemTheme() {
+  if (typeof window === 'undefined' || !window.matchMedia) return 'light';
+  return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+}
+
+function themeModeLabel(value: ThemeMode) {
+  return themeOptions.find((option) => option.value === value)?.label ?? '跟随系统';
+}
+
+function saveThemeMode(mode: ThemeMode) {
+  try {
+    window.localStorage.setItem(themeStorageKey, mode);
+  } catch {
+    // Theme persistence is best-effort; keep the in-memory selection working.
+  }
+}
+
 function formatError(error: unknown) {
   const message =
     typeof error === 'string' ? error : error instanceof Error ? error.message : JSON.stringify(error);
   if (message.includes('生成已强制停止')) {
     return '生成已强制停止';
+  }
+  if (
+    message.includes('rate_limit_exceeded') ||
+    message.includes('Rate limit reached') ||
+    message.includes('input-images per min')
+  ) {
+    return 'OpenAI 图像接口触发限流。通常是当前组织/中转分组的分钟额度刚好用满；请稍等几秒再试，或减少同时生成数量/参考图数量。';
   }
   if (message.includes('502 Bad Gateway') || message.includes('upstream_error')) {
     return '上游模型服务返回 502。通常是中转站或模型供应商临时失败，不是本地程序错误；可以换模型、降低分辨率，或稍后/换供应商重试。';
@@ -597,6 +645,8 @@ function App() {
   const [imageCount, setImageCount] = useState(1);
   const [status, setStatus] = useState('准备就绪');
   const [settingsStatus, setSettingsStatus] = useState('');
+  const [themeMode, setThemeMode] = useState<ThemeMode>(readStoredThemeMode);
+  const [systemTheme, setSystemTheme] = useState<'light' | 'dark'>(preferredSystemTheme);
   const [isBusy, setIsBusy] = useState(false);
   const [activeGenerationRequestIds, setActiveGenerationRequestIds] = useState<string[]>([]);
   const [isFetchingModels, setIsFetchingModels] = useState(false);
@@ -613,6 +663,7 @@ function App() {
   const [isUpdateDownloadPaused, setIsUpdateDownloadPaused] = useState(false);
   const [isUpdateOpen, setIsUpdateOpen] = useState(false);
   const autoUpdateDismissedRef = useRef(false);
+  const isGenerationRunningRef = useRef(false);
   const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null);
   const [updateDownloadProgress, setUpdateDownloadProgress] = useState<UpdateDownloadProgress | null>(null);
   const [updateStatus, setUpdateStatus] = useState('');
@@ -673,6 +724,7 @@ function App() {
           Math.round((updateDownloadProgress.downloaded_bytes / updateDownloadProgress.total_bytes) * 100),
         )
       : null;
+  const resolvedTheme = themeMode === 'system' ? systemTheme : themeMode;
 
   function setStep(index: number, status: GenerationStep['status']) {
     setGenerationSteps((steps) =>
@@ -694,6 +746,10 @@ function App() {
     setIsModelPickerOpen(false);
     setIsCountPickerOpen(false);
     setIsSizePickerOpen(false);
+  }
+
+  function chooseThemeMode(mode: ThemeMode) {
+    setThemeMode(mode);
   }
 
   function switchWorkspacePage(page: WorkspacePage) {
@@ -1041,6 +1097,9 @@ function App() {
   }
 
   async function generateImage() {
+    if (isGenerationRunningRef.current || isBusy) {
+      return;
+    }
     if (!selectedImageModel) {
       setStatus('请先在设置中获取并选择图像模型');
       return;
@@ -1059,27 +1118,28 @@ function App() {
       setStatus(`提示词引用了 @参考图${invalidReferenceIndex}，但当前只有 ${generationMaterialPaths.length} 张参考图`);
       return;
     }
-    setIsBusy(true);
-    closeParamPickers();
-    const totalCount = imageCount;
-    const providerId = providerForm.id;
     const generationWorkspacePage = activeWorkspacePage;
     const generationIsPoster = generationWorkspacePage === 'poster';
-    const generationResultNoun = generationIsPoster ? '海报' : '图片';
-    const generationQrPosition = qrPosition;
-    const generationQrCodePath = generationIsPoster ? qrCodePath : null;
-    const generationShouldPlaceQrCode = Boolean(generationQrCodePath);
-    const displayPrompt = generationIsPoster && generationShouldPlaceQrCode
-      ? `${prompt}（二维码：${qrPositionLabel(generationQrPosition)}）`
-      : prompt;
-    const generationPrompt = buildPromptForReferenceImages(prompt, generationMaterialPaths.length);
-    const generationModel = selectedImageModel;
-    const generationSize = imageSize;
-    const requestIds = Array.from({ length: totalCount }, () => createRequestId());
-    setActiveGenerationRequestIds(requestIds);
-    setGenerationSteps(initialGenerationSteps);
-    setStatus(`正在生成 ${totalCount} 张${generationResultNoun}...`);
+    isGenerationRunningRef.current = true;
+    setIsBusy(true);
     try {
+      closeParamPickers();
+      const totalCount = imageCount;
+      const providerId = providerForm.id;
+      const generationResultNoun = generationIsPoster ? '海报' : '图片';
+      const generationQrPosition = qrPosition;
+      const generationQrCodePath = generationIsPoster ? qrCodePath : null;
+      const generationShouldPlaceQrCode = Boolean(generationQrCodePath);
+      const displayPrompt = generationIsPoster && generationShouldPlaceQrCode
+        ? `${prompt}（二维码：${qrPositionLabel(generationQrPosition)}）`
+        : prompt;
+      const generationPrompt = buildPromptForReferenceImages(prompt, generationMaterialPaths.length);
+      const generationModel = selectedImageModel;
+      const generationSize = imageSize;
+      const requestIds = Array.from({ length: totalCount }, () => createRequestId());
+      setActiveGenerationRequestIds(requestIds);
+      setGenerationSteps(initialGenerationSteps);
+      setStatus(`正在生成 ${totalCount} 张${generationResultNoun}...`);
       startStep(0);
       await new Promise((resolve) => window.setTimeout(resolve, 80));
       startStep(1);
@@ -1183,6 +1243,7 @@ function App() {
       const failText = generationIsPoster ? '制作失败' : '生成失败';
       setStatus(message.includes('生成已强制停止') ? '已强制停止生成' : `${failText}：${message}`);
     } finally {
+      isGenerationRunningRef.current = false;
       setIsBusy(false);
       setActiveGenerationRequestIds([]);
     }
@@ -1584,6 +1645,23 @@ function App() {
       setUpdateStatus(`关闭下载失败：${formatError(error)}`);
     }
   }
+
+  useEffect(() => {
+    if (typeof window === 'undefined' || !window.matchMedia) return undefined;
+    const mediaQuery = window.matchMedia('(prefers-color-scheme: dark)');
+    const updateSystemTheme = () => setSystemTheme(mediaQuery.matches ? 'dark' : 'light');
+
+    updateSystemTheme();
+    mediaQuery.addEventListener('change', updateSystemTheme);
+    return () => mediaQuery.removeEventListener('change', updateSystemTheme);
+  }, []);
+
+  useEffect(() => {
+    document.documentElement.dataset.theme = resolvedTheme;
+    document.documentElement.dataset.themeMode = themeMode;
+    document.documentElement.style.colorScheme = resolvedTheme;
+    saveThemeMode(themeMode);
+  }, [resolvedTheme, themeMode]);
 
   useEffect(() => {
     invoke('clear_material_image_cache').catch(() => undefined);
@@ -2176,7 +2254,7 @@ function App() {
             </div>
 
             <div className="generation-actions">
-              <button className="generate-button" onClick={generateImage} disabled={isBusy}>
+              <button className="generate-button" onClick={generateImage} disabled={isBusy} type="button">
                 {isBusy ? `正在${isPosterPage ? '制作' : '生成'}...` : `开始${isPosterPage ? '制作' : '生成'}`}
               </button>
               <button
@@ -2261,6 +2339,30 @@ function App() {
             </div>
 
             <div className="settings-content">
+              <div className="appearance-panel">
+                <div className="section-heading">
+                  <div>
+                    <span>外观</span>
+                    <strong>主题模式</strong>
+                  </div>
+                  <small>{themeMode === 'system' ? `当前${resolvedTheme === 'dark' ? '夜间' : '日间'}` : themeModeLabel(themeMode)}</small>
+                </div>
+                <div className="theme-mode-options" role="group" aria-label="主题模式">
+                  {themeOptions.map((option) => (
+                    <button
+                      aria-pressed={themeMode === option.value}
+                      className={`theme-mode-option ${themeMode === option.value ? 'active' : ''}`}
+                      key={option.value}
+                      onClick={() => chooseThemeMode(option.value)}
+                      type="button"
+                    >
+                      <span className={`theme-mode-swatch ${option.value}`} aria-hidden="true" />
+                      <strong>{option.label}</strong>
+                    </button>
+                  ))}
+                </div>
+              </div>
+
               <div className="settings-form">
                 <label className="field">
                   <span>配置 ID</span>

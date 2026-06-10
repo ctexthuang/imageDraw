@@ -125,6 +125,23 @@ pub async fn generate_image(
         .filter(|model| !model.trim().is_empty())
         .ok_or_else(|| AppError::Provider("image model is empty".to_string()))?;
 
+    let request_id = input
+        .request_id
+        .clone()
+        .filter(|value| !value.trim().is_empty());
+    let (cancel_sender, cancel_receiver) = oneshot::channel();
+    if let Some(request_id) = &request_id {
+        let mut cancellations = state.cancellations.lock().await;
+        if cancellations.contains_key(request_id) {
+            return Err(AppError::Provider("重复的生成请求已忽略".to_string()));
+        }
+        cancellations.insert(request_id.clone(), cancel_sender);
+    }
+    let cancel_guard = CancellationGuard {
+        cancellations: state.cancellations.clone(),
+        request_id: request_id.clone(),
+    };
+
     let task = repository::create_generation_task(
         &state.db,
         CreateGenerationTaskInput {
@@ -141,23 +158,6 @@ pub async fn generate_image(
         },
     )
     .await?;
-
-    let request_id = input
-        .request_id
-        .clone()
-        .filter(|value| !value.trim().is_empty());
-    let (cancel_sender, cancel_receiver) = oneshot::channel();
-    if let Some(request_id) = &request_id {
-        state
-            .cancellations
-            .lock()
-            .await
-            .insert(request_id.clone(), cancel_sender);
-    }
-    let cancel_guard = CancellationGuard {
-        cancellations: state.cancellations.clone(),
-        request_id: request_id.clone(),
-    };
 
     let poster_qr_overlay = input.poster_qr_overlay.clone();
     let image_future = run_image_generation(
