@@ -28,6 +28,8 @@ pub enum AppError {
     Json(#[from] serde_json::Error),
     #[error("image error: {0}")]
     Image(#[from] image::ImageError),
+    #[error("zip error: {0}")]
+    Zip(#[from] zip::result::ZipError),
     #[error("provider error: {0}")]
     Provider(String),
 }
@@ -74,9 +76,13 @@ pub fn run() {
             commands::gallery::get_gallery_directory,
             commands::gallery::pick_gallery_directory,
             commands::gallery::set_gallery_directory,
+            commands::generation::clear_generated_image_history,
             commands::generation::create_generation_task,
             commands::generation::cancel_generation,
+            commands::generation::delete_generated_image_history,
+            commands::generation::export_generated_image_history,
             commands::generation::generate_image,
+            commands::generation::list_generated_images,
             commands::update::check_for_updates,
             commands::update::cancel_update_download,
             commands::update::download_update_asset,

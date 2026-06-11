@@ -6,12 +6,12 @@ use std::{
 };
 
 use base64::{engine::general_purpose, Engine as _};
-use chrono::Local;
+use chrono::{DateTime, Local, NaiveDateTime, TimeZone};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Manager};
 
-use crate::AppError;
+use crate::{db::models::LegacyGeneratedImageInput, AppError};
 
 pub struct StoredImage {
     pub file_path: PathBuf,
@@ -163,6 +163,88 @@ pub fn generated_image_display_path(
     Ok(Some(preview_path.to_string_lossy().to_string()))
 }
 
+pub fn remove_generated_image_file(app: &AppHandle, file_path: &Path) -> Result<(), AppError> {
+    let preview_path = if cfg!(target_os = "windows") {
+        fs::metadata(file_path)
+            .ok()
+            .filter(|metadata| metadata.is_file())
+            .and_then(|metadata| {
+                let extension = normalized_image_extension(file_path)?;
+                let previews_dir = generated_image_previews_dir(app).ok()?;
+                Some(previews_dir.join(image_cache_file_name(file_path, &metadata, extension)))
+            })
+    } else {
+        None
+    };
+
+    match fs::remove_file(file_path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+
+    if let Some(preview_path) = preview_path {
+        let _ = fs::remove_file(preview_path);
+    }
+
+    Ok(())
+}
+
+pub fn clear_generated_image_files(app: &AppHandle) -> Result<usize, AppError> {
+    let images_dir = generated_images_dir(app)?;
+    let Ok(entries) = fs::read_dir(images_dir) else {
+        return Ok(0);
+    };
+
+    let mut removed_count = 0;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_file() || !is_app_generated_image_file(&path) {
+            continue;
+        }
+
+        match fs::remove_file(&path) {
+            Ok(()) => removed_count += 1,
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+
+    let _ = clear_generated_image_preview_cache(app);
+    Ok(removed_count)
+}
+
+pub fn list_legacy_generated_image_files(
+    app: &AppHandle,
+) -> Result<Vec<LegacyGeneratedImageInput>, AppError> {
+    let images_dir = generated_images_dir(app)?;
+    let Ok(entries) = fs::read_dir(images_dir) else {
+        return Ok(Vec::new());
+    };
+
+    let mut images = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_file() || !is_app_generated_image_file(&path) {
+            continue;
+        }
+
+        let metadata = fs::metadata(&path)?;
+        let Some(mime_type) = image_mime_type(&path) else {
+            continue;
+        };
+
+        images.push(LegacyGeneratedImageInput {
+            file_path: path.to_string_lossy().to_string(),
+            mime_type: mime_type.to_string(),
+            file_size: i64::try_from(metadata.len()).unwrap_or(i64::MAX),
+            created_at: generated_image_created_at(&path, &metadata),
+        });
+    }
+
+    Ok(images)
+}
+
 pub fn clear_generated_image_preview_cache(app: &AppHandle) -> Result<(), AppError> {
     if !cfg!(target_os = "windows") {
         return Ok(());
@@ -266,6 +348,57 @@ fn write_unique_generated_image(
     }
 
     unreachable!("unique generated image path search is unbounded")
+}
+
+fn is_app_generated_image_file(path: &Path) -> bool {
+    if normalized_image_extension(path).is_none() {
+        return false;
+    }
+
+    let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) else {
+        return false;
+    };
+
+    let bytes = stem.as_bytes();
+    if bytes.len() != 15 && bytes.len() != 18 {
+        return false;
+    }
+    if bytes.get(8) != Some(&b'-') {
+        return false;
+    }
+    if !bytes[..8].iter().all(u8::is_ascii_digit) || !bytes[9..15].iter().all(u8::is_ascii_digit) {
+        return false;
+    }
+
+    bytes.len() == 15
+        || (bytes.get(15) == Some(&b'-') && bytes[16..18].iter().all(u8::is_ascii_digit))
+}
+
+fn image_mime_type(path: &Path) -> Option<&'static str> {
+    match normalized_image_extension(path)? {
+        "jpg" => Some("image/jpeg"),
+        "png" => Some("image/png"),
+        "webp" => Some("image/webp"),
+        _ => None,
+    }
+}
+
+fn generated_image_created_at(path: &Path, metadata: &fs::Metadata) -> String {
+    if let Some(timestamp) = path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .and_then(|stem| stem.get(0..15))
+        .and_then(|timestamp| NaiveDateTime::parse_from_str(timestamp, "%Y%m%d-%H%M%S").ok())
+        .and_then(|timestamp| Local.from_local_datetime(&timestamp).single())
+    {
+        return timestamp.to_rfc3339();
+    }
+
+    metadata
+        .modified()
+        .map(DateTime::<Local>::from)
+        .unwrap_or_else(|_| Local::now())
+        .to_rfc3339()
 }
 
 pub fn set_generated_images_dir(
@@ -416,6 +549,35 @@ fn move_generated_images(
     }
 
     Ok(moved)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn generated_file_detection_matches_app_file_names() {
+        assert!(is_app_generated_image_file(Path::new(
+            "20260603-142032.png"
+        )));
+        assert!(is_app_generated_image_file(Path::new(
+            "20260603-142032-01.jpg"
+        )));
+        assert!(is_app_generated_image_file(Path::new(
+            "20260603-142032-12.webp"
+        )));
+
+        assert!(!is_app_generated_image_file(Path::new("logo.png")));
+        assert!(!is_app_generated_image_file(Path::new(
+            "20260603-142032.txt"
+        )));
+        assert!(!is_app_generated_image_file(Path::new(
+            "20260603142032.png"
+        )));
+        assert!(!is_app_generated_image_file(Path::new(
+            "20260603-142032-custom.png"
+        )));
+    }
 }
 
 fn is_image_file(path: &Path) -> bool {

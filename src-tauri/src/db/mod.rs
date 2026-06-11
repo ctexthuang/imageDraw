@@ -3,7 +3,7 @@ use std::fs;
 use sqlx::{sqlite::SqliteConnectOptions, Row, SqlitePool};
 use tauri::{AppHandle, Manager};
 
-use crate::AppError;
+use crate::{storage, AppError};
 
 pub mod models;
 pub mod repository;
@@ -31,6 +31,15 @@ pub async fn init(app: &AppHandle) -> Result<SqlitePool, AppError> {
         "TEXT NOT NULL DEFAULT '{}'",
     )
     .await?;
+    ensure_column(
+        &pool,
+        "generation_tasks",
+        "workspace",
+        "TEXT NOT NULL DEFAULT 'generate'",
+    )
+    .await?;
+    let legacy_images = storage::list_legacy_generated_image_files(app)?;
+    repository::backfill_legacy_generated_images(&pool, legacy_images).await?;
 
     Ok(pool)
 }

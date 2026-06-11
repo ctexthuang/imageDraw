@@ -47,6 +47,7 @@ pub struct GenerationTask {
     pub model: String,
     pub size: Option<String>,
     pub quality: Option<String>,
+    pub workspace: String,
     pub status: String,
     pub created_at: String,
 }
@@ -59,6 +60,7 @@ pub struct CreateGenerationTaskInput {
     pub model: String,
     pub size: Option<String>,
     pub quality: Option<String>,
+    pub workspace: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, FromRow)]
@@ -69,6 +71,14 @@ pub struct ImageAsset {
     pub mime_type: Option<String>,
     pub file_size: Option<i64>,
     pub source_type: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct LegacyGeneratedImageInput {
+    pub file_path: String,
+    pub mime_type: String,
+    pub file_size: i64,
     pub created_at: String,
 }
 
@@ -85,11 +95,13 @@ pub struct GenerateImageInput {
     pub provider_id: String,
     pub request_id: Option<String>,
     pub prompt: String,
+    pub display_prompt: Option<String>,
     pub model: Option<String>,
     pub size: Option<String>,
     pub quality: Option<String>,
     pub image_paths: Vec<String>,
     pub poster_qr_overlay: Option<PosterQrOverlayInput>,
+    pub workspace: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -118,4 +130,19 @@ pub enum PosterQrPosition {
 pub struct GenerateImageOutput {
     pub task: GenerationTask,
     pub asset: ImageAssetOutput,
+}
+
+#[derive(Debug, Clone, Serialize, FromRow)]
+pub struct GeneratedImageRecord {
+    pub id: String,
+    pub task_id: String,
+    pub file_path: String,
+    pub display_path: Option<String>,
+    pub prompt: String,
+    pub model: String,
+    pub size: Option<String>,
+    pub quality: Option<String>,
+    pub source_type: String,
+    pub created_at: String,
+    pub workspace: String,
 }

@@ -396,7 +396,16 @@ button.mini {
 .heading-actions {
   align-items: center;
   display: flex;
+  flex-wrap: nowrap;
   gap: 8px;
+  justify-content: flex-end;
+}
+
+.section-heading > .heading-actions {
+  align-items: center;
+  display: flex;
+  flex-wrap: nowrap;
+  justify-content: flex-end;
 }
 
 .field {
@@ -446,6 +455,18 @@ small {
   flex: 1 1 auto;
   grid-template-rows: auto minmax(0, 1fr);
   min-height: 220px;
+}
+
+.prompt-toolbar {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+  justify-content: space-between;
+  min-height: 28px;
+}
+
+.prompt-toolbar button {
+  flex: 0 0 auto;
 }
 
 .prompt-field textarea {
@@ -752,8 +773,9 @@ small {
 .material-header .material-actions {
   display: flex;
   flex: 0 0 auto;
-  flex-wrap: nowrap;
+  flex-wrap: wrap;
   gap: 8px;
+  justify-content: flex-end;
 }
 
 .material-header .material-actions button {
@@ -1277,9 +1299,81 @@ small {
 }
 
 .result-heading {
+  align-items: start;
   border-bottom: 1px solid var(--border);
+  display: grid;
+  gap: 8px;
+  grid-template-columns: minmax(0, 1fr) auto;
   margin: -2px -2px 12px;
   padding: 0 2px 12px;
+}
+
+.result-heading > div:first-child {
+  min-width: 0;
+}
+
+.result-heading .heading-actions {
+  gap: 6px;
+}
+
+.result-heading .heading-actions button {
+  font-size: 11px;
+  min-width: 0;
+  padding: 4px 7px;
+  white-space: nowrap;
+}
+
+.export-progress {
+  display: grid;
+  gap: 6px;
+  margin: -4px 0 12px;
+}
+
+.export-progress-header {
+  align-items: center;
+  display: flex;
+  gap: 10px;
+  justify-content: space-between;
+  min-width: 0;
+}
+
+.export-progress-header span {
+  color: #374151;
+  font-size: 12px;
+  font-weight: 700;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.export-progress-header strong {
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.export-progress-track {
+  background: #edf2f7;
+  border-radius: 999px;
+  height: 7px;
+  overflow: hidden;
+}
+
+.export-progress-track > div {
+  background: var(--accent);
+  border-radius: inherit;
+  height: 100%;
+  transition: width 0.16s ease;
+  width: 0;
+}
+
+.export-progress small {
+  color: var(--muted);
+  display: block;
+  font-size: 11px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
 }
 
 .empty-state {
@@ -1318,14 +1412,45 @@ small {
   margin: 0;
 }
 
-.image-grid {
+.image-date-groups {
+  align-content: start;
   display: grid;
-  gap: 12px;
-  grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
+  gap: 14px;
   margin-bottom: 12px;
   min-height: 0;
   overflow: auto;
   padding-right: 2px;
+}
+
+.image-date-group {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+
+.image-date-heading {
+  align-items: center;
+  color: var(--muted);
+  display: flex;
+  font-size: 12px;
+  justify-content: space-between;
+  line-height: 1.2;
+  min-width: 0;
+}
+
+.image-date-heading strong {
+  color: #111827;
+  font-size: 13px;
+}
+
+.image-date-heading span {
+  color: var(--muted);
+}
+
+.image-grid {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
 }
 
 .image-card {
@@ -1334,12 +1459,14 @@ small {
   border-radius: 10px;
   display: grid;
   min-width: 0;
-  overflow: hidden;
+  overflow: visible;
+  position: relative;
 }
 
 .image-card img {
   aspect-ratio: 1;
   background: #eef0f3;
+  border-radius: 9px 9px 0 0;
   display: block;
   object-fit: cover;
   width: 100%;
@@ -1365,6 +1492,82 @@ small {
   overflow: hidden;
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 3;
+}
+
+.image-prompt-wrap {
+  border-radius: 6px;
+  outline: none;
+  position: relative;
+}
+
+.image-prompt-wrap:focus {
+  box-shadow: 0 0 0 2px rgba(22, 119, 255, 0.18);
+}
+
+.image-prompt-popover {
+  background: #ffffff;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 14px 34px rgba(17, 24, 39, 0.16);
+  color: #1f2937;
+  font-size: 12px;
+  left: -6px;
+  line-height: 1.55;
+  max-height: var(--image-prompt-popover-max-height, 180px);
+  opacity: 0;
+  overscroll-behavior: contain;
+  overflow: auto;
+  padding: 9px 10px;
+  pointer-events: none;
+  position: absolute;
+  right: -6px;
+  top: calc(100% + 7px);
+  transform: translateY(-3px);
+  transition: opacity 0.14s ease, transform 0.14s ease, visibility 0.14s ease;
+  visibility: hidden;
+  white-space: pre-wrap;
+  word-break: break-word;
+  z-index: 30;
+}
+
+.image-prompt-wrap[data-placement='top'] .image-prompt-popover {
+  bottom: calc(100% + 7px);
+  top: auto;
+  transform: translateY(3px);
+}
+
+.image-prompt-wrap:hover .image-prompt-popover,
+.image-prompt-wrap:focus .image-prompt-popover,
+.image-prompt-wrap:focus-within .image-prompt-popover {
+  opacity: 1;
+  pointer-events: auto;
+  transform: translateY(0);
+  visibility: visible;
+}
+
+.image-card-actions {
+  display: grid;
+  gap: 6px;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) minmax(48px, 0.62fr);
+}
+
+.image-card-actions button {
+  align-items: center;
+  display: inline-flex;
+  font-size: 11px;
+  gap: 4px;
+  justify-content: center;
+  min-width: 0;
+  padding: 4px 5px;
+  white-space: nowrap;
+}
+
+.history-action-main {
+  min-width: 68px;
+}
+
+.history-action-delete {
+  min-width: 48px;
 }
 
 .image-card span {
@@ -1934,6 +2137,8 @@ small {
   animation: fadeUp 0.18s ease-out;
   display: grid;
   gap: 0;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  height: min(90vh, 880px);
   left: 50%;
   max-height: min(90vh, 880px);
   max-width: min(92vw, 980px);
@@ -1957,6 +2162,21 @@ small {
   top: 50%;
   transform: translate(-50%, -50%);
   width: min(92vw, 560px);
+}
+
+.confirm-modal {
+  animation: fadeUp 0.18s ease-out;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: var(--shadow);
+  display: grid;
+  left: 50%;
+  overflow: hidden;
+  position: absolute;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  width: min(92vw, 520px);
 }
 
 .update-modal {
@@ -1984,6 +2204,29 @@ small {
   display: grid;
   gap: 12px;
   padding: 14px 16px 16px;
+}
+
+.confirm-modal-body {
+  display: grid;
+  gap: 12px;
+  padding: 14px 16px 16px;
+}
+
+.confirm-modal-body p {
+  color: #4b5563;
+  font-size: 13px;
+  line-height: 1.5;
+  margin: 0;
+}
+
+.confirm-actions {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.confirm-actions button {
+  min-height: 34px;
 }
 
 .gallery-path-box {
@@ -2018,10 +2261,18 @@ small {
   min-height: 34px;
 }
 
-.preview-modal img {
+.preview-image-frame {
   background: #eef0f3;
+  display: flex;
+  justify-content: center;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.preview-modal img {
   display: block;
-  max-height: 62vh;
+  height: 100%;
+  max-height: 100%;
   object-fit: contain;
   width: 100%;
 }
@@ -2030,6 +2281,9 @@ small {
   border-top: 1px solid var(--border);
   display: grid;
   gap: 9px;
+  max-height: min(28vh, 240px);
+  overscroll-behavior: contain;
+  overflow: auto;
   padding: 14px 16px;
 }
 
@@ -2087,6 +2341,14 @@ small {
   color: #b7c1d3;
 }
 
+:root[data-theme='dark'] .export-progress-header span {
+  color: #d8e1ef;
+}
+
+:root[data-theme='dark'] .export-progress-track {
+  background: #243047;
+}
+
 :root[data-theme='dark'] .rail-button:hover:not(:disabled) span,
 :root[data-theme='dark'] .rail-button.active span,
 :root[data-theme='dark'] .mode-switch button:hover:not(:disabled),
@@ -2106,10 +2368,13 @@ small {
 :root[data-theme='dark'] .preview-header h2,
 :root[data-theme='dark'] .model-record,
 :root[data-theme='dark'] .provider-item strong,
+:root[data-theme='dark'] .image-date-heading strong,
 :root[data-theme='dark'] .image-card strong,
+:root[data-theme='dark'] .image-prompt-popover,
 :root[data-theme='dark'] .empty-state div,
 :root[data-theme='dark'] .gallery-path-box strong,
 :root[data-theme='dark'] .update-summary strong,
+:root[data-theme='dark'] .confirm-modal-body p,
 :root[data-theme='dark'] .preview-info p {
   color: var(--text);
 }
@@ -2122,6 +2387,7 @@ small {
 :root[data-theme='dark'] .reference-mention-popover,
 :root[data-theme='dark'] .reference-mention-empty,
 :root[data-theme='dark'] .qr-preview,
+:root[data-theme='dark'] .qr-toggle,
 :root[data-theme='dark'] .material-card,
 :root[data-theme='dark'] .reference-card,
 :root[data-theme='dark'] .reference-empty,
@@ -2129,12 +2395,54 @@ small {
 :root[data-theme='dark'] .model-record,
 :root[data-theme='dark'] .provider-item,
 :root[data-theme='dark'] .image-card,
+:root[data-theme='dark'] .image-prompt-popover,
 :root[data-theme='dark'] .gallery-path-box,
 :root[data-theme='dark'] .update-summary,
 :root[data-theme='dark'] .theme-mode-options {
   background: #182233;
   border-color: var(--border);
   color: var(--text);
+}
+
+:root[data-theme='dark'] .qr-preview img {
+  background: #101826;
+}
+
+:root[data-theme='dark'] .qr-preview span,
+:root[data-theme='dark'] .poster-options-header span {
+  color: #a9b8ce;
+}
+
+:root[data-theme='dark'] .qr-toggle {
+  border-color: #344156;
+  color: #d8e1ef;
+}
+
+:root[data-theme='dark'] .qr-toggle:hover:not(:disabled),
+:root[data-theme='dark'] .qr-toggle.active {
+  background: rgba(105, 167, 255, 0.18);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+:root[data-theme='dark'] .qr-remove-button {
+  background: rgba(255, 122, 122, 0.12);
+  border-color: rgba(255, 122, 122, 0.38);
+  color: var(--danger);
+}
+
+:root[data-theme='dark'] .qr-remove-button:hover:not(:disabled) {
+  background: rgba(255, 122, 122, 0.2);
+  border-color: rgba(255, 122, 122, 0.58);
+  color: #ffaaa8;
+}
+
+:root[data-theme='dark'] .image-card p {
+  color: #b7c1d3;
+}
+
+:root[data-theme='dark'] .image-prompt-popover {
+  box-shadow: 0 18px 42px rgba(0, 0, 0, 0.36);
 }
 
 :root[data-theme='dark'] input:focus,
@@ -2188,6 +2496,7 @@ small {
 }
 
 :root[data-theme='dark'] .reference-card img,
+:root[data-theme='dark'] .preview-image-frame,
 :root[data-theme='dark'] .preview-modal img {
   background: #0f1724;
 }
@@ -2327,6 +2636,7 @@ small {
 :root[data-theme='dark'] .settings-drawer,
 :root[data-theme='dark'] .preview-modal,
 :root[data-theme='dark'] .gallery-modal,
+:root[data-theme='dark'] .confirm-modal,
 :root[data-theme='dark'] .update-modal {
   box-shadow: var(--shadow);
 }

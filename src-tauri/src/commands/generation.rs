@@ -1,8 +1,20 @@
-use std::{collections::HashMap, io::Cursor, sync::Arc, time::Duration};
+use std::{
+    collections::{HashMap, HashSet},
+    fmt::Write as FmtWrite,
+    fs,
+    io::{Cursor, Read, Write},
+    path::Path,
+    sync::Arc,
+    time::Duration,
+};
 
+use chrono::Local;
 use image::{imageops, ImageFormat, RgbaImage};
-use tauri::{AppHandle, State};
+use serde::Serialize;
+use tauri::{AppHandle, Emitter, State};
+use tauri_plugin_dialog::DialogExt;
 use tokio::sync::{oneshot, Mutex};
+use zip::{write::SimpleFileOptions, CompressionMethod, ZipWriter};
 
 use crate::{
     ai::{
@@ -15,14 +27,47 @@ use crate::{
     },
     db::{
         models::{
-            CreateGenerationTaskInput, GenerateImageInput, GenerateImageOutput, GenerationTask,
-            ImageAssetOutput, PosterQrOverlayInput, PosterQrPosition,
+            CreateGenerationTaskInput, GenerateImageInput, GenerateImageOutput,
+            GeneratedImageRecord, GenerationTask, ImageAssetOutput, PosterQrOverlayInput,
+            PosterQrPosition,
         },
         repository,
     },
     state::AppState,
     storage, AppError,
 };
+
+const EXPORT_GENERATED_IMAGE_HISTORY_PROGRESS_EVENT: &str = "generated-history-export-progress";
+
+#[derive(Debug, Serialize)]
+pub struct ExportGeneratedImageHistoryOutput {
+    pub count: usize,
+    pub file_path: String,
+}
+
+#[derive(Debug, Serialize)]
+struct GeneratedImageHistoryExport {
+    exported_at: String,
+    count: usize,
+    images: Vec<GeneratedImageHistoryExportRecord>,
+}
+
+#[derive(Debug, Serialize)]
+struct GeneratedImageHistoryExportRecord {
+    #[serde(flatten)]
+    record: GeneratedImageRecord,
+    image_archive_path: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ExportGeneratedImageHistoryProgress {
+    file_name: String,
+    processed_bytes: u64,
+    total_bytes: u64,
+    processed_images: usize,
+    total_images: usize,
+    stage: String,
+}
 
 #[tauri::command]
 pub async fn cancel_generation(
@@ -41,6 +86,302 @@ pub async fn create_generation_task(
     input: CreateGenerationTaskInput,
 ) -> Result<GenerationTask, AppError> {
     repository::create_generation_task(&state.db, input).await
+}
+
+#[tauri::command]
+pub async fn list_generated_images(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    limit: Option<i64>,
+) -> Result<Vec<GeneratedImageRecord>, AppError> {
+    let records = repository::list_generated_images(&state.db, limit).await?;
+    let mut visible_records = Vec::with_capacity(records.len());
+
+    for mut record in records {
+        let file_path = Path::new(&record.file_path);
+        if !file_path.is_file() {
+            continue;
+        }
+        record.display_path = storage::generated_image_display_path(&app, file_path)?;
+        visible_records.push(record);
+    }
+
+    Ok(visible_records)
+}
+
+#[tauri::command]
+pub async fn delete_generated_image_history(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    asset_id: String,
+) -> Result<bool, AppError> {
+    let Some(file_path) = repository::generated_image_file_path(&state.db, &asset_id).await? else {
+        return Ok(false);
+    };
+
+    let path = Path::new(&file_path);
+    if path.is_file() {
+        storage::remove_generated_image_file(&app, path)?;
+    }
+
+    repository::delete_generated_image_history(&state.db, &asset_id).await
+}
+
+#[tauri::command]
+pub async fn clear_generated_image_history(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<usize, AppError> {
+    let file_paths = repository::list_generated_image_file_paths(&state.db).await?;
+    let mut seen_file_paths = HashSet::new();
+    for file_path in &file_paths {
+        if seen_file_paths.insert(file_path.clone()) {
+            storage::remove_generated_image_file(&app, Path::new(file_path))?;
+        }
+    }
+    let fallback_removed_count = storage::clear_generated_image_files(&app)?;
+
+    repository::clear_generated_image_history(&state.db).await?;
+    Ok(file_paths.len().max(fallback_removed_count))
+}
+
+#[tauri::command]
+pub async fn export_generated_image_history(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<Option<ExportGeneratedImageHistoryOutput>, AppError> {
+    let records = repository::list_all_generated_images(&state.db).await?;
+    let mut image_entries = Vec::new();
+    let mut export_records = Vec::new();
+
+    for record in records {
+        let source_path = Path::new(&record.file_path);
+        if !source_path.is_file() {
+            continue;
+        }
+
+        let image_archive_path = image_archive_path(&record, source_path);
+        let image_size = fs::metadata(source_path)?.len();
+        image_entries.push((
+            source_path.to_path_buf(),
+            image_archive_path.clone(),
+            image_size,
+        ));
+        export_records.push(GeneratedImageHistoryExportRecord {
+            record,
+            image_archive_path,
+        });
+    }
+
+    let file_name = format!(
+        "image-draw-history-{}.zip",
+        Local::now().format("%Y%m%d-%H%M%S")
+    );
+    let Some(file_path) = app
+        .dialog()
+        .file()
+        .add_filter("ZIP", &["zip"])
+        .set_file_name(&file_name)
+        .blocking_save_file()
+        .and_then(|path| path.as_path().map(|path| path.to_path_buf()))
+    else {
+        return Ok(None);
+    };
+
+    let export = GeneratedImageHistoryExport {
+        exported_at: Local::now().to_rfc3339(),
+        count: export_records.len(),
+        images: export_records,
+    };
+    let history_json = serde_json::to_string_pretty(&export)?;
+    let prompts_markdown = build_prompts_markdown(&export);
+    let total_bytes = history_json.len() as u64
+        + prompts_markdown.len() as u64
+        + image_entries
+            .iter()
+            .map(|(_, _, image_size)| *image_size)
+            .sum::<u64>();
+    let file_label = file_path
+        .file_name()
+        .and_then(|file_name| file_name.to_str())
+        .unwrap_or("image-draw-history.zip");
+
+    let export_file = fs::File::create(&file_path)?;
+    let mut zip = ZipWriter::new(export_file);
+    let options = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
+    let mut processed_bytes = 0_u64;
+
+    emit_export_progress(
+        &app,
+        file_label,
+        processed_bytes,
+        total_bytes,
+        0,
+        image_entries.len(),
+        "准备压缩包",
+    );
+
+    zip.start_file("history.json", options)?;
+    zip.write_all(history_json.as_bytes())?;
+    processed_bytes += history_json.len() as u64;
+    emit_export_progress(
+        &app,
+        file_label,
+        processed_bytes,
+        total_bytes,
+        0,
+        image_entries.len(),
+        "写入历史信息",
+    );
+
+    zip.start_file("prompts.md", options)?;
+    zip.write_all(prompts_markdown.as_bytes())?;
+    processed_bytes += prompts_markdown.len() as u64;
+    emit_export_progress(
+        &app,
+        file_label,
+        processed_bytes,
+        total_bytes,
+        0,
+        image_entries.len(),
+        "写入提示词",
+    );
+
+    let total_images = image_entries.len();
+    let mut buffer = [0_u8; 256 * 1024];
+    for (image_index, (source_path, archive_path, _)) in image_entries.into_iter().enumerate() {
+        zip.start_file(archive_path, options)?;
+        let mut image_file = fs::File::open(source_path)?;
+        loop {
+            let read_bytes = image_file.read(&mut buffer)?;
+            if read_bytes == 0 {
+                break;
+            }
+
+            zip.write_all(&buffer[..read_bytes])?;
+            processed_bytes += read_bytes as u64;
+            emit_export_progress(
+                &app,
+                file_label,
+                processed_bytes.min(total_bytes),
+                total_bytes,
+                image_index,
+                total_images,
+                &format!("正在打包图片 {}/{}", image_index + 1, total_images),
+            );
+        }
+        emit_export_progress(
+            &app,
+            file_label,
+            processed_bytes.min(total_bytes),
+            total_bytes,
+            image_index + 1,
+            total_images,
+            &format!("已打包图片 {}/{}", image_index + 1, total_images),
+        );
+    }
+
+    zip.finish()?;
+    emit_export_progress(
+        &app,
+        file_label,
+        total_bytes,
+        total_bytes,
+        total_images,
+        total_images,
+        "导出完成",
+    );
+
+    Ok(Some(ExportGeneratedImageHistoryOutput {
+        count: export.count,
+        file_path: file_path.to_string_lossy().to_string(),
+    }))
+}
+
+fn image_archive_path(record: &GeneratedImageRecord, file_path: &Path) -> String {
+    let extension = file_path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(|extension| {
+            extension
+                .chars()
+                .filter(|character| character.is_ascii_alphanumeric())
+                .collect::<String>()
+                .to_ascii_lowercase()
+        })
+        .filter(|extension| !extension.is_empty())
+        .unwrap_or_else(|| "png".to_string());
+
+    format!(
+        "images/{}/{}.{}",
+        archive_date_folder(&record.created_at),
+        record.id,
+        extension
+    )
+}
+
+fn archive_date_folder(created_at: &str) -> String {
+    let date = created_at.get(0..10).unwrap_or("unknown-date");
+    let safe_date = date
+        .chars()
+        .filter(|character| character.is_ascii_alphanumeric() || *character == '-')
+        .collect::<String>();
+
+    if safe_date.is_empty() {
+        "unknown-date".to_string()
+    } else {
+        safe_date
+    }
+}
+
+fn build_prompts_markdown(export: &GeneratedImageHistoryExport) -> String {
+    let mut output = String::new();
+    let _ = writeln!(output, "# Image Draw AI 历史导出");
+    let _ = writeln!(output);
+    let _ = writeln!(output, "- 导出时间：{}", export.exported_at);
+    let _ = writeln!(output, "- 数量：{}", export.count);
+
+    for image in &export.images {
+        let _ = writeln!(output);
+        let _ = writeln!(output, "## {}", image.record.created_at);
+        let _ = writeln!(output);
+        let _ = writeln!(output, "- 图片：{}", image.image_archive_path);
+        let _ = writeln!(output, "- 模型：{}", image.record.model);
+        if let Some(size) = &image.record.size {
+            let _ = writeln!(output, "- 尺寸：{}", size);
+        }
+        if let Some(quality) = &image.record.quality {
+            let _ = writeln!(output, "- 质量：{}", quality);
+        }
+        let _ = writeln!(output);
+        let _ = writeln!(output, "```text");
+        let _ = writeln!(output, "{}", image.record.prompt);
+        let _ = writeln!(output, "```");
+    }
+
+    output
+}
+
+fn emit_export_progress(
+    app: &AppHandle,
+    file_name: &str,
+    processed_bytes: u64,
+    total_bytes: u64,
+    processed_images: usize,
+    total_images: usize,
+    stage: &str,
+) {
+    let _ = app.emit(
+        EXPORT_GENERATED_IMAGE_HISTORY_PROGRESS_EVENT,
+        ExportGeneratedImageHistoryProgress {
+            file_name: file_name.to_string(),
+            processed_bytes,
+            total_bytes,
+            processed_images,
+            total_images,
+            stage: stage.to_string(),
+        },
+    );
 }
 
 #[tauri::command]
@@ -142,6 +483,12 @@ pub async fn generate_image(
         request_id: request_id.clone(),
     };
 
+    let task_prompt = input
+        .display_prompt
+        .as_ref()
+        .filter(|value| !value.trim().is_empty())
+        .cloned()
+        .unwrap_or_else(|| input.prompt.clone());
     let task = repository::create_generation_task(
         &state.db,
         CreateGenerationTaskInput {
@@ -151,10 +498,11 @@ pub async fn generate_image(
             } else {
                 "image_edit".to_string()
             },
-            prompt: input.prompt.clone(),
+            prompt: task_prompt,
             model: model.clone(),
             size: input.size.clone(),
             quality: input.quality.clone(),
+            workspace: input.workspace.clone(),
         },
     )
     .await?;

@@ -21,6 +21,7 @@ CREATE TABLE IF NOT EXISTS generation_tasks (
   model TEXT NOT NULL,
   size TEXT,
   quality TEXT,
+  workspace TEXT NOT NULL DEFAULT 'generate',
   status TEXT NOT NULL,
   error_message TEXT,
   created_at TEXT NOT NULL,

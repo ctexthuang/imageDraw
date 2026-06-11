@@ -45,11 +45,16 @@ type ImageAssetResult = {
   id: string;
   file_path: string;
   display_path?: string | null;
+  source_type?: string;
+  created_at?: string;
 };
 
 type GenerateImageOutput = {
   task: {
     id: string;
+    prompt: string;
+    created_at: string;
+    workspace: string;
     status: string;
   };
   asset: ImageAssetResult;
@@ -57,11 +62,32 @@ type GenerateImageOutput = {
 
 type SessionImage = {
   id: string;
+  task_id?: string;
   file_path: string;
   display_path?: string | null;
   prompt: string;
   created_at: string;
   workspace?: WorkspacePage;
+};
+
+type GeneratedImageRecord = {
+  id: string;
+  task_id: string;
+  file_path: string;
+  display_path?: string | null;
+  prompt: string;
+  model: string;
+  size?: string | null;
+  quality?: string | null;
+  source_type: string;
+  created_at: string;
+  workspace: string;
+};
+
+type ImageDateGroup = {
+  key: string;
+  label: string;
+  images: SessionImage[];
 };
 
 type ProviderModel = {
@@ -119,6 +145,15 @@ type UpdateDownloadProgress = {
   total_bytes?: number | null;
 };
 
+type ExportGeneratedImageHistoryProgress = {
+  file_name: string;
+  processed_bytes: number;
+  total_bytes: number;
+  processed_images: number;
+  total_images: number;
+  stage: string;
+};
+
 type GalleryDirectoryInfo = {
   directory: string;
   is_custom: boolean;
@@ -131,6 +166,11 @@ type SetGalleryDirectoryOutput = {
     new_path: string;
     display_path?: string | null;
   }>;
+};
+
+type ExportGeneratedImageHistoryOutput = {
+  count: number;
+  file_path: string;
 };
 
 const themeStorageKey = 'image-draw-ai-theme';
@@ -200,6 +240,66 @@ function isErrorStatus(message: string) {
 
 function imageDisplayPath(image: Pick<SessionImage, 'file_path' | 'display_path'>) {
   return image.display_path || image.file_path;
+}
+
+function normalizeWorkspace(value?: string | null): WorkspacePage {
+  return value === 'poster' ? 'poster' : 'generate';
+}
+
+function imageDate(value: string) {
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+
+function imageDateKey(value: string) {
+  const date = imageDate(value);
+  if (!date) return 'unknown';
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  return `${date.getFullYear()}-${month}-${day}`;
+}
+
+function imageDateLabel(key: string) {
+  if (key === 'unknown') return '未知日期';
+  const [yearValue, monthValue, dayValue] = key.split('-').map(Number);
+  const date = new Date(yearValue, monthValue - 1, dayValue);
+  const today = new Date();
+  const todayStart = new Date(today.getFullYear(), today.getMonth(), today.getDate()).getTime();
+  const dateStart = date.getTime();
+  const dayDiff = Math.round((todayStart - dateStart) / 86_400_000);
+  const suffix = `${monthValue}月${dayValue}日`;
+  if (dayDiff === 0) return `今天 · ${suffix}`;
+  if (dayDiff === 1) return `昨天 · ${suffix}`;
+  return yearValue === today.getFullYear() ? suffix : `${yearValue}年${suffix}`;
+}
+
+function formatImageTime(value: string) {
+  const date = imageDate(value);
+  if (!date) return value;
+  return date.toLocaleString('zh-CN', {
+    hour: '2-digit',
+    minute: '2-digit',
+    month: '2-digit',
+    day: '2-digit',
+  });
+}
+
+function groupImagesByDate(images: SessionImage[]): ImageDateGroup[] {
+  const groups = new Map<string, ImageDateGroup>();
+  for (const image of images) {
+    const key = imageDateKey(image.created_at);
+    const existing = groups.get(key);
+    if (existing) {
+      existing.images.push(image);
+    } else {
+      groups.set(key, {
+        key,
+        label: imageDateLabel(key),
+        images: [image],
+      });
+    }
+  }
+  return Array.from(groups.values());
 }
 
 function formatBytes(value?: number | null) {
@@ -656,6 +756,11 @@ function App() {
   const [isSizePickerOpen, setIsSizePickerOpen] = useState(false);
   const [isGalleryOpen, setIsGalleryOpen] = useState(false);
   const [isUpdatingGalleryDirectory, setIsUpdatingGalleryDirectory] = useState(false);
+  const [isClearHistoryOpen, setIsClearHistoryOpen] = useState(false);
+  const [isClearingHistory, setIsClearingHistory] = useState(false);
+  const [isExportingHistory, setIsExportingHistory] = useState(false);
+  const [exportHistoryProgress, setExportHistoryProgress] =
+    useState<ExportGeneratedImageHistoryProgress | null>(null);
   const [galleryInfo, setGalleryInfo] = useState<GalleryDirectoryInfo | null>(null);
   const [galleryStatus, setGalleryStatus] = useState('');
   const [isCheckingUpdate, setIsCheckingUpdate] = useState(false);
@@ -704,6 +809,7 @@ function App() {
   const visibleSessionImages = sessionImages.filter((image) =>
     (image.workspace ?? 'generate') === activeWorkspacePage,
   );
+  const visibleImageGroups = groupImagesByDate(visibleSessionImages);
   const resultNoun = isPosterPage ? '海报' : '生成';
   const isQrPlacementEnabled = Boolean(qrCodePath);
   const quickMeta = isPosterPage && isQrPlacementEnabled
@@ -722,6 +828,13 @@ function App() {
       ? Math.min(
           100,
           Math.round((updateDownloadProgress.downloaded_bytes / updateDownloadProgress.total_bytes) * 100),
+        )
+      : null;
+  const exportHistoryPercent =
+    exportHistoryProgress?.total_bytes
+      ? Math.min(
+          100,
+          Math.round((exportHistoryProgress.processed_bytes / exportHistoryProgress.total_bytes) * 100),
         )
       : null;
   const resolvedTheme = themeMode === 'system' ? systemTheme : themeMode;
@@ -755,6 +868,25 @@ function App() {
   function switchWorkspacePage(page: WorkspacePage) {
     setActiveWorkspacePage(page);
     closeParamPickers();
+  }
+
+  function clearPrompt() {
+    if (isBusy) return;
+    const hasReferenceMention = referenceMentionIndexes(prompt).length > 0;
+    if (hasReferenceMention && materialPaths.length > 0) {
+      cleanupMaterialImages(materialPaths);
+      setMaterialPaths([]);
+    }
+    setPrompt('');
+    setReferenceMentionRange(null);
+    setActiveReferenceMentionOptionIndex(0);
+    setPromptScrollTop(0);
+    setStatus('已清除提示词');
+    window.requestAnimationFrame(() => {
+      if (!promptTextareaRef.current) return;
+      promptTextareaRef.current.scrollTop = 0;
+      promptTextareaRef.current.focus();
+    });
   }
 
   function updatePrompt(value: string, cursor: number) {
@@ -1010,6 +1142,21 @@ function App() {
     return result;
   }
 
+  async function refreshGeneratedImages() {
+    const images = await invoke<GeneratedImageRecord[]>('list_generated_images', { limit: 800 });
+    setSessionImages(
+      images.map((image) => ({
+        id: image.id,
+        task_id: image.task_id,
+        file_path: image.file_path,
+        display_path: image.display_path ?? null,
+        prompt: image.prompt,
+        created_at: image.created_at,
+        workspace: normalizeWorkspace(image.workspace),
+      })),
+    );
+  }
+
   async function saveProvider() {
     if (!providerForm.api_key.trim()) {
       setStatus('请先填写 API Key，再保存配置');
@@ -1165,6 +1312,7 @@ function App() {
                 provider_id: providerId,
                 request_id: requestId,
                 prompt: generationPrompt,
+                display_prompt: displayPrompt,
                 model: generationModel,
                 size: generationSize === 'auto' ? null : generationSize,
                 image_paths: generationMaterialPaths,
@@ -1176,6 +1324,7 @@ function App() {
                       margin_ratio: 0.05,
                     }
                   : null,
+                workspace: generationWorkspacePage,
               },
             });
 
@@ -1186,15 +1335,15 @@ function App() {
             completedCount += 1;
             successCount += 1;
             completedPaths.push(result.asset.file_path);
-            const createdAt = new Date().toLocaleString();
             setSessionImages((images) => [
               {
                 id: result.asset.id,
+                task_id: result.task.id,
                 file_path: result.asset.file_path,
                 display_path: result.asset.display_path ?? null,
-                prompt: displayPrompt,
-                created_at: createdAt,
-                workspace: generationWorkspacePage,
+                prompt: result.task.prompt || displayPrompt,
+                created_at: result.asset.created_at || result.task.created_at || new Date().toISOString(),
+                workspace: normalizeWorkspace(result.task.workspace || generationWorkspacePage),
               },
               ...images,
             ]);
@@ -1341,6 +1490,82 @@ function App() {
     setStatus(`已导入 ${nextPaths.length} 张参考图`);
   }
 
+  function applyHistoryPrompt(image: SessionImage) {
+    const missingReferenceIndexes = referenceMentionIndexes(image.prompt).filter(
+      (index) => index > materialPaths.length,
+    );
+    const nextPrompt = rewriteReferenceMentionsAfterRemovedIndexes(image.prompt, missingReferenceIndexes);
+
+    setPrompt(nextPrompt);
+    setReferenceMentionRange(null);
+    setStatus(missingReferenceIndexes.length > 0 ? '已应用历史提示词，缺失的参考图标记已移除' : '已应用历史提示词');
+    window.requestAnimationFrame(() => {
+      promptTextareaRef.current?.focus();
+      promptTextareaRef.current?.setSelectionRange(nextPrompt.length, nextPrompt.length);
+    });
+  }
+
+  async function importHistoryImage(image: SessionImage) {
+    await addMaterialImages([image.file_path]);
+  }
+
+  function placeHistoryPromptPopover(event: React.MouseEvent<HTMLDivElement> | React.FocusEvent<HTMLDivElement>) {
+    const wrap = event.currentTarget;
+    const popover = wrap.querySelector<HTMLElement>('.image-prompt-popover');
+    if (!popover) return;
+
+    const wrapRect = wrap.getBoundingClientRect();
+    const scrollContainer = wrap.closest<HTMLElement>('.image-date-groups');
+    const containerRect = scrollContainer?.getBoundingClientRect();
+    const topBoundary = Math.max(0, containerRect?.top ?? 0);
+    const bottomBoundary = Math.min(window.innerHeight, containerRect?.bottom ?? window.innerHeight);
+    const gap = 7;
+    const desiredHeight = Math.min(popover.scrollHeight, 180);
+    const availableBelow = bottomBoundary - wrapRect.bottom - gap;
+    const availableAbove = wrapRect.top - topBoundary - gap;
+    const placement = availableBelow >= desiredHeight || availableBelow >= availableAbove ? 'bottom' : 'top';
+    const available = Math.max(0, placement === 'top' ? availableAbove : availableBelow);
+    const maxHeight = Math.max(48, Math.min(180, available));
+
+    wrap.dataset.placement = placement;
+    wrap.style.setProperty('--image-prompt-popover-max-height', `${maxHeight}px`);
+  }
+
+  function containHistoryPromptPopoverScroll(event: React.WheelEvent<HTMLDivElement>) {
+    const popover = event.currentTarget;
+    const canScroll = popover.scrollHeight > popover.clientHeight;
+    if (!canScroll) return;
+
+    const atTop = popover.scrollTop <= 0;
+    const atBottom = Math.ceil(popover.scrollTop + popover.clientHeight) >= popover.scrollHeight;
+    const scrollingPastTop = event.deltaY < 0 && atTop;
+    const scrollingPastBottom = event.deltaY > 0 && atBottom;
+
+    event.stopPropagation();
+    if (scrollingPastTop || scrollingPastBottom) {
+      event.preventDefault();
+    }
+  }
+
+  async function deleteHistoryImage(image: SessionImage) {
+    setStatus('正在删除历史记录...');
+    try {
+      const didDelete = await invoke<boolean>('delete_generated_image_history', { assetId: image.id });
+      if (!didDelete) {
+        setStatus('这条历史记录已经不存在');
+        setSessionImages((images) => images.filter((item) => item.id !== image.id));
+        return;
+      }
+      setSessionImages((images) => images.filter((item) => item.id !== image.id));
+      if (previewImage?.id === image.id) {
+        setPreviewImage(null);
+      }
+      setStatus('已删除历史记录和本地图片文件');
+    } catch (error) {
+      setStatus(`删除历史失败：${formatError(error)}`);
+    }
+  }
+
   function cleanupMaterialImages(paths: string[]) {
     if (paths.length === 0 || isBusy) return;
     invoke('remove_material_images', { paths }).catch(() => undefined);
@@ -1452,6 +1677,46 @@ function App() {
       await invoke('open_generated_dir');
     } catch (error) {
       setStatus(`打开保存目录失败：${formatError(error)}`);
+    }
+  }
+
+  async function exportGeneratedHistory() {
+    setIsExportingHistory(true);
+    setExportHistoryProgress(null);
+    setStatus('请选择压缩包保存位置...');
+    try {
+      const result = await invoke<ExportGeneratedImageHistoryOutput | null>('export_generated_image_history');
+      if (!result) {
+        setExportHistoryProgress(null);
+        setStatus('已取消导出历史信息');
+        return;
+      }
+      setStatus(`已导出 ${result.count} 条历史和图片：${result.file_path}`);
+    } catch (error) {
+      setExportHistoryProgress(null);
+      setStatus(`导出历史和图片失败：${formatError(error)}`);
+    } finally {
+      setIsExportingHistory(false);
+    }
+  }
+
+  function openClearHistoryDialog() {
+    setIsClearHistoryOpen(true);
+  }
+
+  async function confirmClearGeneratedHistory() {
+    setIsClearingHistory(true);
+    setStatus('正在清空历史信息和本地图片...');
+    try {
+      const count = await invoke<number>('clear_generated_image_history');
+      setSessionImages([]);
+      setPreviewImage(null);
+      setIsClearHistoryOpen(false);
+      setStatus(`已清空 ${count} 条历史信息或本地图片`);
+    } catch (error) {
+      setStatus(`清空历史失败：${formatError(error)}`);
+    } finally {
+      setIsClearingHistory(false);
     }
   }
 
@@ -1667,6 +1932,7 @@ function App() {
     invoke('clear_material_image_cache').catch(() => undefined);
     invoke('clear_generated_image_preview_cache').catch(() => undefined);
     refreshProviders().catch(() => setStatus('后端未启动或数据库初始化失败'));
+    refreshGeneratedImages().catch(() => undefined);
     checkForUpdates({ silent: true, autoOpen: true }).catch(() => undefined);
     closeParamPickers();
   }, []);
@@ -1677,6 +1943,28 @@ function App() {
 
     listen<UpdateDownloadProgress>('update-download-progress', (event) => {
       setUpdateDownloadProgress(event.payload);
+    })
+      .then((nextUnlisten) => {
+        if (isDisposed) {
+          nextUnlisten();
+        } else {
+          unlisten = nextUnlisten;
+        }
+      })
+      .catch(() => undefined);
+
+    return () => {
+      isDisposed = true;
+      unlisten?.();
+    };
+  }, []);
+
+  useEffect(() => {
+    let isDisposed = false;
+    let unlisten: (() => void) | undefined;
+
+    listen<ExportGeneratedImageHistoryProgress>('generated-history-export-progress', (event) => {
+      setExportHistoryProgress(event.payload);
     })
       .then((nextUnlisten) => {
         if (isDisposed) {
@@ -1991,7 +2279,17 @@ function App() {
             </div>
 
             <div className="field prompt-field">
-              <span>提示词</span>
+              <div className="prompt-toolbar">
+                <span>提示词</span>
+                <button
+                  className="ghost mini"
+                  disabled={isBusy || prompt.length === 0}
+                  onClick={clearPrompt}
+                  type="button"
+                >
+                  清除提示词
+                </button>
+              </div>
               <div className="prompt-input-wrap" ref={promptInputWrapRef}>
                 <div
                   aria-hidden="true"
@@ -2029,9 +2327,14 @@ function App() {
                 </div>
                 <div className="material-actions">
                   <button className="ghost mini" onClick={pickMaterialImages} disabled={isBusy}>上传</button>
-                  {materialPaths.length > 0 && (
-                    <button className="ghost mini" onClick={clearMaterialImages} disabled={isBusy}>清空</button>
-                  )}
+                  <button
+                    className="ghost mini"
+                    onClick={clearMaterialImages}
+                    disabled={isBusy || materialPaths.length === 0}
+                    type="button"
+                  >
+                    清空参考图
+                  </button>
                 </div>
               </div>
 
@@ -2277,33 +2580,123 @@ function App() {
             <div className="section-heading result-heading">
               <div>
                 <span>结果区</span>
-                <strong>本次{resultNoun} {visibleSessionImages.length} 张</strong>
+                <strong>{resultNoun}历史 {visibleSessionImages.length} 张</strong>
               </div>
               <div className="heading-actions">
+                <button
+                  className="ghost mini"
+                  onClick={exportGeneratedHistory}
+                  disabled={isExportingHistory || sessionImages.length === 0}
+                  type="button"
+                >
+                  {isExportingHistory ? '导出中...' : '导出压缩包'}
+                </button>
+                <button
+                  className="danger mini"
+                  onClick={openClearHistoryDialog}
+                  disabled={isClearingHistory}
+                  type="button"
+                >
+                  清空历史
+                </button>
                 <button className="ghost mini" onClick={openGeneratedDir}>打开目录</button>
               </div>
             </div>
 
+            {exportHistoryProgress && (
+              <div className="export-progress" role="status" aria-live="polite">
+                <div className="export-progress-header">
+                  <span>{exportHistoryProgress.stage}</span>
+                  <strong>{exportHistoryPercent ?? 0}%</strong>
+                </div>
+                <div className="export-progress-track">
+                  <div style={{ width: `${exportHistoryPercent ?? 0}%` }} />
+                </div>
+                <small>
+                  {exportHistoryProgress.file_name}
+                  {exportHistoryProgress.total_images > 0
+                    ? ` · ${exportHistoryProgress.processed_images}/${exportHistoryProgress.total_images} 张`
+                    : ''}
+                  {' · '}
+                  {formatBytes(exportHistoryProgress.processed_bytes)}
+                  {' / '}
+                  {formatBytes(exportHistoryProgress.total_bytes)}
+                </small>
+              </div>
+            )}
+
             {visibleSessionImages.length === 0 ? (
               <div className="empty-state">
                 <img src={appLogo} alt="" />
-                <div>等待首张{isPosterPage ? '海报' : '作品'}</div>
+                <div>暂无{isPosterPage ? '海报' : '作品'}历史</div>
                 <p>{selectedImageModel || '未获取模型'} / {imageSize} / {imageCount} 张</p>
               </div>
             ) : (
-              <div className="image-grid">
-                {visibleSessionImages.map((image) => (
-                  <article className="image-card" key={image.id}>
-                    <button className="image-preview-button" onClick={() => setPreviewImage(image)}>
-                      <img src={convertFileSrc(imageDisplayPath(image))} alt={image.prompt} />
-                    </button>
-                    <div>
-                      <strong>{image.created_at}</strong>
-                      <p>{image.prompt}</p>
-                      <button className="ghost mini" onClick={() => revealImage(image.file_path)}>定位文件</button>
-                      <span>{image.file_path}</span>
+              <div className="image-date-groups">
+                {visibleImageGroups.map((group) => (
+                  <section className="image-date-group" key={group.key}>
+                    <div className="image-date-heading">
+                      <strong>{group.label}</strong>
+                      <span>{group.images.length} 张</span>
                     </div>
-                  </article>
+                    <div className="image-grid">
+                      {group.images.map((image) => (
+                        <article className="image-card" key={image.id}>
+                          <button className="image-preview-button" onClick={() => setPreviewImage(image)}>
+                            <img src={convertFileSrc(imageDisplayPath(image))} alt={image.prompt} />
+                          </button>
+                          <div>
+                            <strong>{formatImageTime(image.created_at)}</strong>
+                            <div
+                              className="image-prompt-wrap"
+                              onFocus={placeHistoryPromptPopover}
+                              onMouseEnter={placeHistoryPromptPopover}
+                              tabIndex={0}
+                            >
+                              <p>{image.prompt}</p>
+                              <div
+                                className="image-prompt-popover"
+                                onWheel={containHistoryPromptPopoverScroll}
+                                role="tooltip"
+                              >
+                                {image.prompt}
+                              </div>
+                            </div>
+                            <div className="image-card-actions">
+                              <button
+                                className="ghost mini history-action history-action-main"
+                                onClick={() => applyHistoryPrompt(image)}
+                                title="应用提示词到输入框"
+                                type="button"
+                              >
+                                应用提示词
+                              </button>
+                              <button
+                                className="ghost mini history-action history-action-main"
+                                onClick={() => importHistoryImage(image)}
+                                title="导入为参考图"
+                                type="button"
+                              >
+                                导入参考图
+                              </button>
+                              <button
+                                className="danger mini history-action history-action-delete"
+                                onClick={() => deleteHistoryImage(image)}
+                                title="删除历史记录"
+                                type="button"
+                              >
+                                删除
+                              </button>
+                            </div>
+                            <button className="ghost mini" onClick={() => revealImage(image.file_path)} type="button">
+                              定位文件
+                            </button>
+                            <span>{image.file_path}</span>
+                          </div>
+                        </article>
+                      ))}
+                    </div>
+                  </section>
                 ))}
               </div>
             )}
@@ -2511,6 +2904,56 @@ function App() {
         </div>
       )}
 
+      {isClearHistoryOpen && (
+        <div className="preview-layer">
+          <button
+            aria-label="关闭清空历史确认"
+            className="drawer-mask"
+            onClick={() => !isClearingHistory && setIsClearHistoryOpen(false)}
+          />
+          <section className="confirm-modal">
+            <div className="preview-header">
+              <div>
+                <span>危险操作</span>
+                <h2>清空历史信息</h2>
+              </div>
+              <button
+                className="ghost"
+                onClick={() => setIsClearHistoryOpen(false)}
+                disabled={isClearingHistory}
+                type="button"
+              >
+                关闭
+              </button>
+            </div>
+            <div className="confirm-modal-body">
+              <p>
+                这会清空所有生成历史，包括历史提示词记录和已经保存到本地的生成图片。此操作不可撤销。
+              </p>
+              <p>建议先使用“导出历史”导出压缩包并确认备份完成，确认不需要后再继续。</p>
+              <div className="confirm-actions">
+                <button
+                  className="ghost"
+                  onClick={() => setIsClearHistoryOpen(false)}
+                  disabled={isClearingHistory}
+                  type="button"
+                >
+                  取消
+                </button>
+                <button
+                  className="danger"
+                  onClick={confirmClearGeneratedHistory}
+                  disabled={isClearingHistory}
+                  type="button"
+                >
+                  {isClearingHistory ? '清空中...' : '确认清空'}
+                </button>
+              </div>
+            </div>
+          </section>
+        </div>
+      )}
+
       {isUpdateOpen && (
         <div className="preview-layer">
           <button className="drawer-mask" onClick={closeUpdateManager} aria-label="关闭软件更新" />
@@ -2613,11 +3056,13 @@ function App() {
             <div className="preview-header">
               <div>
                 <span>图片预览</span>
-                <h2>{previewImage.created_at}</h2>
+                <h2>{formatImageTime(previewImage.created_at)}</h2>
               </div>
               <button className="ghost" onClick={() => setPreviewImage(null)}>关闭</button>
             </div>
-            <img src={convertFileSrc(imageDisplayPath(previewImage))} alt={previewImage.prompt} />
+            <div className="preview-image-frame">
+              <img src={convertFileSrc(imageDisplayPath(previewImage))} alt={previewImage.prompt} />
+            </div>
             <div className="preview-info">
               <p>{previewImage.prompt}</p>
               <button className="ghost" onClick={() => revealImage(previewImage.file_path)}>在文件夹中显示</button>
